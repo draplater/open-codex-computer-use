@@ -3,9 +3,11 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -13,6 +15,121 @@ import (
 func TestToolDefinitionCount(t *testing.T) {
 	if got := len(toolDefinitions()); got != 9 {
 		t.Fatalf("toolDefinitions() count = %d, want 9", got)
+	}
+}
+
+func observationPythonResponse(t *testing.T, response string) string {
+	t.Helper()
+	dir := t.TempDir()
+	requestPath := filepath.Join(dir, "request.json")
+	script := "#!/bin/sh\ncat \"$2\" > \"$OCU_TEST_OBSERVATION_REQUEST\"\nprintf '%s\\n' \"$OCU_TEST_OBSERVATION_RESPONSE\"\n"
+	if err := os.WriteFile(filepath.Join(dir, "python3"), []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("OCU_TEST_OBSERVATION_REQUEST", requestPath)
+	t.Setenv("OCU_TEST_OBSERVATION_RESPONSE", response)
+	return requestPath
+}
+
+func TestSelectiveObservationRequestAndDefaultCompatibility(t *testing.T) {
+	for _, flags := range []map[string]any{{}, {"include_ax": false}, {"include_screenshot": false}, {"include_ax": true, "include_screenshot": true}} {
+		t.Run(fmt.Sprint(flags), func(t *testing.T) {
+			path := observationPythonResponse(t, `{"ok":true,"snapshot":{"app":{"name":"Editor","pid":42}}}`)
+			args := map[string]any{"app": "Editor"}
+			for key, value := range flags {
+				args[key] = value
+			}
+			if result := newService().callTool("get_app_state", args); result.IsError {
+				t.Fatalf("observation failed: %#v", result)
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var request map[string]any
+			if err := json.Unmarshal(data, &request); err != nil {
+				t.Fatal(err)
+			}
+			for _, key := range []string{"include_ax", "include_screenshot"} {
+				want, present := flags[key]
+				got, sent := request[key]
+				if present != sent || got != want {
+					t.Fatalf("%s serialized as %#v (%v), want %#v (%v)", key, got, sent, want, present)
+				}
+			}
+		})
+	}
+}
+
+func TestSelectiveObservationRejectsInvalidOptions(t *testing.T) {
+	for _, args := range []map[string]any{
+		{"app": "Editor", "include_ax": "false"},
+		{"app": "Editor", "include_screenshot": nil},
+		{"app": "Editor", "include_ax": false, "include_screenshot": false},
+	} {
+		if result := newService().callTool("get_app_state", args); !result.IsError {
+			t.Fatalf("invalid options accepted: %#v", args)
+		}
+	}
+}
+
+func TestSelectiveObservationSchemaKeepsFullDefaults(t *testing.T) {
+	tool := findToolDefinition(t, "get_app_state")
+	properties := tool.InputSchema["properties"].(map[string]any)
+	for _, name := range []string{"include_ax", "include_screenshot"} {
+		property := properties[name].(map[string]any)
+		if property["type"] != "boolean" || property["default"] != true {
+			t.Fatalf("%s schema = %#v", name, property)
+		}
+	}
+	if required := tool.InputSchema["required"].([]string); len(required) != 1 || required[0] != "app" {
+		t.Fatalf("observation options should be optional: %#v", required)
+	}
+}
+
+func TestScreenshotOnlyInvalidatesIndexesAcrossWindowAndProcessChanges(t *testing.T) {
+	for _, pid := range []int{42, 43} {
+		t.Run(strconv.Itoa(pid), func(t *testing.T) {
+			path := observationPythonResponse(t, fmt.Sprintf(`{"ok":true,"snapshot":{"app":{"name":"Editor","pid":%d},"windowTitle":"New Window","windowBounds":{"width":300,"height":200},"screenshotPngBase64":"cG5n"}}`, pid))
+			s := newService()
+			old := &appSnapshot{App: appDescriptor{Name: "Editor", PID: 42}, WindowTitle: "Old Window", Elements: []elementRecord{{Index: 7}}}
+			s.rememberSnapshot("old-window-query", old)
+			s.snapshots["editor"] = old
+			other := &appSnapshot{App: appDescriptor{Name: "Other", PID: 99}}
+			s.rememberSnapshot("Other", other)
+			result := s.callTool("get_app_state", map[string]any{"app": "Editor", "include_ax": false})
+			if result.IsError || len(result.Content) != 2 || !strings.Contains(result.Content[0].Text, "indexes invalidated") {
+				t.Fatalf("screenshot-only result = %#v", result)
+			}
+			if s.currentSnapshot("old-window-query") != nil || s.currentSnapshot("Other") != other {
+				t.Fatal("old alias retained or unrelated app modified")
+			}
+			if pid != 42 && s.currentSnapshot("42") != nil {
+				t.Fatal("old PID alias retained across process change")
+			}
+			if _, err := lookupElement(s.currentSnapshot("Editor"), "7"); err == nil {
+				t.Fatal("stale index remains usable")
+			}
+			if result := s.setValue("Editor", "7", "bad"); !result.IsError {
+				t.Fatal("stale element action accepted")
+			}
+			x, y := 10.0, 20.0
+			if result := s.click("Editor", "", &x, &y, 1, "left", "auto"); result.IsError {
+				t.Fatalf("coordinate action unavailable: %#v", result)
+			}
+			data, err := os.ReadFile(path)
+			if err != nil || !strings.Contains(string(data), `"tool":"click"`) {
+				t.Fatalf("coordinate click not sent: %s, %v", data, err)
+			}
+			t.Setenv("OCU_TEST_OBSERVATION_RESPONSE", fmt.Sprintf(`{"ok":true,"snapshot":{"app":{"name":"Editor","pid":%d},"elements":[{"index":8}]}}`, pid))
+			if result := s.callTool("get_app_state", map[string]any{"app": "Editor"}); result.IsError {
+				t.Fatalf("AX refresh failed: %#v", result)
+			}
+			if _, err := lookupElement(s.currentSnapshot("Editor"), "8"); err != nil {
+				t.Fatal("explicit AX did not restore indexes")
+			}
+		})
 	}
 }
 

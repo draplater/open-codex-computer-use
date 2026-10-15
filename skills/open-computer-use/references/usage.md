@@ -51,6 +51,28 @@ await app.typeText("Hello");
 await app.getAXState();
 ```
 
+### Selective observation on Linux (opt-in)
+
+The Linux native `get_app_state` tool accepts `include_ax` and
+`include_screenshot`. Both default to `true`; at least one must remain true.
+The REPL forwards the corresponding optional `includeAX` / `includeScreenshot`
+booleans:
+
+```js
+var editor = await cua.getApp("gedit", { initialState: false });
+await editor.getScreenshot({ includeAX: false }); // no AX, focus or selection walk
+await editor.click([100, 100]);                   // window-relative coordinates
+await editor.getAXState({ includeScreenshot: false }); // no capture or PNG encoding
+// Use newly observed element indexes only after inspecting the AX result.
+```
+
+Screenshot-only observation invalidates prior element indexes and cached query
+aliases for that app, even if the window title is unchanged. Its result explicitly
+reports this. Coordinate actions use the newly observed window bounds; element
+actions require a fresh AX observation. Existing calls without these options keep
+their full native observation behavior. These flags are implemented by the Linux
+runtime only; action read-back and other platforms are unchanged.
+
 The code-first surface also forwards macOS background-operation options:
 
 ```js

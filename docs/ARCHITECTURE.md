@@ -130,6 +130,7 @@
 ### 7. Linux Runtime
 
 - Linux runtime 位于 `apps/OpenComputerUseLinux`，以 Go 维护 CLI、`call --calls` sequence、MCP JSON-RPC、tool schema 和进程内 snapshot cache。
+- Linux 的显式 `get_app_state` 支持可选布尔参数 `include_ax`、`include_screenshot`，省略时均为 true，至少一项必须为 true。`include_ax:false` 跳过 AX tree、焦点和选区读取；`include_screenshot:false` 跳过截图和 PNG 编码。纯截图会明确使该应用旧的元素索引及其查询别名失效，返回说明；坐标操作可用，元素操作须重新显式观察 AX。不会根据窗口标题推断旧索引仍有效。REPL 可显式使用 `app.getScreenshot({includeAX:false})` 或 `app.getAXState({includeScreenshot:false})`；这些选项仅由 Linux runtime 实现，现有无参数方法与动作回读保持不变。
 - 构建入口是 `scripts/build-open-computer-use-linux.sh --arch arm64|amd64`，默认输出到 `dist/linux/<arch>/open-computer-use`；npm release package 会把两个 Linux artifact 内置到已有 root/alias packages，Node launcher 按 `process.platform/process.arch` 自动选择。
 - Go runtime 通过 `go:embed` 带上 `runtime.py`，执行 tool call 时临时落盘并调用 `python3`。Python bridge 使用 GNOME/GObject Introspection 暴露的 AT-SPI2 接口做 app/window discovery、accessibility tree rendering、semantic action、editable text、value set，以及 best-effort 的 key/mouse fallback；文本能力通过 `Accessible.get_interfaces()` 检测 `Text` / `EditableText`，不依赖不同 PyGObject 版本未必存在的便捷属性。
 - Linux 上最接近 macOS AX 的是 AT-SPI2/D-Bus accessibility，而不是一套统一的后台键鼠输入模型。第一版优先使用元素暴露的 AT-SPI action、EditableText 和 Value 接口；coordinate `click` / `drag` 与 `press_key` 使用 AT-SPI event synthesis fallback，在 Wayland 下只能按 best-effort 处理。`press_key` 的具名键以 keysym 配合 `KeySynthType.SYM` 发送，修饰键以 X modifier mask 配合 `LOCKMODIFIERS` / `UNLOCKMODIFIERS` 保持；`PRESS` / `RELEASE` / `PRESSRELEASE` 只接受硬件 keycode，不能传 keysym。

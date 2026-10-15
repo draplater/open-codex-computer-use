@@ -41,6 +41,7 @@ The runtime exposes an asynchronous app-bound API:
 - \`await app.getAXState({ emit?, textLimit?, maxTreeNodes?, maxTreeDepth?, windowPlacement? })\`
 - \`await app.getScreenshot({ emit? })\`
 - \`await app.getAXStateAndScreenshot(options?)\`
+- Linux-only opt-in observation: \`app.getScreenshot({ includeAX: false })\` skips AX/focus/selection and invalidates prior element indexes; refresh AX before element actions. \`app.getAXState({ includeScreenshot: false })\` skips capture. Omitted options retain full native observation.
 - \`await app.click(elementIndexOrPoint, { mouseButton?, clickCount?, clickMethod? })\`
 - \`await app.scroll(elementIndex, direction, pages?)\`
 - \`await app.drag([fromX, fromY], [toX, toY])\`
@@ -257,6 +258,12 @@ function optionsToSnapshotArgs(options = {}) {
   if (options.maxTreeNodes !== undefined) args.max_tree_nodes = options.maxTreeNodes;
   if (options.maxTreeDepth !== undefined) args.max_tree_depth = options.maxTreeDepth;
   if (options.windowPlacement !== undefined) args.window_placement = options.windowPlacement;
+  for (const [option, argument] of [["includeAX", "include_ax"], ["includeScreenshot", "include_screenshot"]]) {
+    if (options[option] !== undefined) {
+      if (typeof options[option] !== "boolean") throw new Error(`${option} must be a boolean`);
+      args[argument] = options[option];
+    }
+  }
   return args;
 }
 

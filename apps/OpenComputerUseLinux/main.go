@@ -139,6 +139,9 @@ func (s *appSnapshot) result() toolCallResult {
 }
 
 type linuxRequest struct {
+	IncludeAX         *bool `json:"include_ax,omitempty"`
+	IncludeScreenshot *bool `json:"include_screenshot,omitempty"`
+
 	Tool         string         `json:"tool"`
 	App          string         `json:"app,omitempty"`
 	Element      *elementRecord `json:"element,omitempty"`
@@ -214,7 +217,18 @@ func (s *service) callTool(name string, args map[string]any) toolCallResult {
 		if windowPlacement != "keep" {
 			return textResult("window_placement '"+windowPlacement+"' is not supported on Linux", true)
 		}
-		return s.getAppState(requiredString(args, "app"), textLimit, maxTreeNodes, maxTreeDepth)
+		includeAX, err := optionalBool(args, "include_ax")
+		if err != nil {
+			return textResult(err.Error(), true)
+		}
+		includeScreenshot, err := optionalBool(args, "include_screenshot")
+		if err != nil {
+			return textResult(err.Error(), true)
+		}
+		if includeAX != nil && !*includeAX && includeScreenshot != nil && !*includeScreenshot {
+			return textResult("At least one of include_ax or include_screenshot must be true", true)
+		}
+		return s.getAppState(requiredString(args, "app"), textLimit, maxTreeNodes, maxTreeDepth, includeAX, includeScreenshot)
 	case "click":
 		clickMethod, err := parseClickMethod(optionalString(args, "click_method"))
 		if err != nil {
@@ -283,11 +297,11 @@ func (s *service) listApps() toolCallResult {
 	return textResult(response.Text, false)
 }
 
-func (s *service) getAppState(app string, textLimit *textLimit, maxTreeNodes, maxTreeDepth *int) toolCallResult {
+func (s *service) getAppState(app string, textLimit *textLimit, maxTreeNodes, maxTreeDepth *int, includeAX, includeScreenshot *bool) toolCallResult {
 	if app == "" {
 		return textResult("Missing required argument: app", true)
 	}
-	request := linuxRequest{Tool: "get_app_state", App: app}
+	request := linuxRequest{Tool: "get_app_state", App: app, IncludeAX: includeAX, IncludeScreenshot: includeScreenshot}
 	if textLimit != nil {
 		request.TextLimit = textLimit.runtimeValue()
 	}
@@ -301,7 +315,11 @@ func (s *service) getAppState(app string, textLimit *textLimit, maxTreeNodes, ma
 	if result.IsError {
 		return result
 	}
-	return snapshot.result()
+	result = snapshot.result()
+	if includeAX != nil && !*includeAX {
+		result.Content[0].Text += "\nAccessibility omitted; previous element indexes invalidated. Read AX before element-targeted actions."
+	}
+	return result
 }
 
 func (s *service) click(app, elementIndex string, x, y *float64, clickCount int, mouseButton, clickMethod string) toolCallResult {
@@ -488,6 +506,17 @@ func (s *service) refreshSnapshot(app string, request linuxRequest) (*appSnapsho
 	}
 	if response.Snapshot == nil {
 		return nil, textResult("Linux runtime did not return an app snapshot.", true)
+	}
+	if request.IncludeAX != nil && !*request.IncludeAX {
+		// A screenshot cannot validate AX indexes, even if the window title matches.
+		// Invalidate every alias of the prior observation, including PID queries.
+		previous := s.currentSnapshot(app)
+		for alias, cached := range s.snapshots {
+			if cached == previous || cached.App.PID == response.Snapshot.App.PID {
+				delete(s.snapshots, alias)
+			}
+		}
+		response.Snapshot.Elements = nil
 	}
 	s.rememberSnapshot(app, response.Snapshot)
 	return response.Snapshot, toolCallResult{}
@@ -988,6 +1017,18 @@ func optionalString(args map[string]any, key string) string {
 	return value
 }
 
+func optionalBool(args map[string]any, key string) (*bool, error) {
+	value, exists := args[key]
+	if !exists {
+		return nil, nil
+	}
+	boolean, ok := value.(bool)
+	if !ok {
+		return nil, fmt.Errorf("%s must be a boolean", key)
+	}
+	return &boolean, nil
+}
+
 func requiredElementIndex(args map[string]any) string {
 	return strings.TrimSpace(optionalElementIndex(args))
 }
@@ -1217,7 +1258,7 @@ func toolDefinitions() []toolDefinition {
 		},
 		{
 			Name:        "get_app_state",
-			Description: "Get the state of an already running app's key window and return a screenshot and accessibility tree. This must be called once per assistant turn before interacting with the app. This tool is part of plugin `Computer Use`.",
+			Description: "Get the state of an already running app's key window. By default returns a screenshot and accessibility tree; include_ax/include_screenshot can opt out of either collection. This must be called once per assistant turn before interacting with the app. This tool is part of plugin `Computer Use`.",
 			Annotations: readOnlyAnnotations(),
 			InputSchema: objectSchema(map[string]any{
 				"app":              stringProperty("App name or bundle identifier"),
@@ -1225,6 +1266,9 @@ func toolDefinitions() []toolDefinition {
 				"max_tree_nodes":   positiveIntegerProperty("Maximum accessibility tree nodes to render. Defaults to 1200."),
 				"max_tree_depth":   positiveIntegerProperty("Maximum accessibility tree depth to render. Defaults to 64."),
 				"window_placement": enumStringProperty("keep (default) leaves the window where it is. agent_display and restore are macOS-only and not supported on Linux.", windowPlacementValues),
+
+				"include_ax":         map[string]any{"type": "boolean", "default": true, "description": "Include accessibility tree, focus and selection. False skips AX collection and invalidates prior element indexes; coordinate actions remain available. Linux-only."},
+				"include_screenshot": map[string]any{"type": "boolean", "default": true, "description": "Capture and return a screenshot. False skips capture and PNG encoding. Linux-only."},
 			}, []string{"app"}),
 		},
 		{

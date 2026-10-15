@@ -886,6 +886,9 @@ def main():
         raise RuntimeError("runtime.py requires an operation JSON path")
     require_desktop_session()
     Atspi.init()
+    if sys.argv[1] == "--serve":
+        serve(sys.stdin, sys.stdout)
+        return
     with open(sys.argv[1], "r", encoding="utf-8") as file:
         operation = json.load(file)
     try:
@@ -893,6 +896,19 @@ def main():
     except Exception as exc:
         response = {"ok": False, "error": str(exc)}
     print(json.dumps(response, separators=(",", ":")))
+
+
+def serve(input_stream, output_stream):
+    for line in input_stream:
+        try:
+            operation = json.loads(line)
+            if not isinstance(operation, dict):
+                raise ValueError("operation must be a JSON object")
+            response = perform_operation(operation)
+        except Exception as exc:
+            response = {"ok": False, "error": str(exc)}
+        output_stream.write(json.dumps(response, separators=(",", ":")) + "\n")
+        output_stream.flush()
 
 
 if __name__ == "__main__":

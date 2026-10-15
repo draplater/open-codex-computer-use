@@ -171,5 +171,63 @@ class RuntimeKeyTests(unittest.TestCase):
         self.assertEqual(self.events, [])
 
 
+class HiddenDetailsTests(unittest.TestCase):
+    def setUp(self):
+        self.runtime = load_runtime()
+        self.runtime.Atspi.StateType = types.SimpleNamespace(SHOWING="showing")
+
+    def node(self, showing):
+        node = mock.Mock()
+        node.get_name.return_value = "Menu"
+        node.get_role_name.return_value = "menu"
+        node.get_child_count.return_value = 0
+        node.get_state_set.return_value.contains.return_value = showing
+        return node
+
+    def test_hidden_record_retains_identity_and_skips_expensive_properties(self):
+        node = self.node(False)
+        with mock.patch.object(self.runtime, "relative_frame") as geometry, \
+             mock.patch.object(self.runtime, "element_value") as value, \
+             mock.patch.object(self.runtime, "action_names") as actions:
+            record = self.runtime.record_for(node, 7, [0, 3], None, lightweight_hidden=True)
+        self.assertEqual((record["index"], record["runtimeId"], record["name"]), (7, [0, 3], "Menu"))
+        self.assertTrue(record["detailsOmitted"])
+        for query in (geometry, value, actions):
+            query.assert_not_called()
+        node.get_toolkit_name.assert_not_called()
+        node.get_accessible_id.assert_not_called()
+
+    def test_default_and_unknown_or_showing_state_keep_full_details(self):
+        for enabled, showing in ((False, False), (True, True), (True, None)):
+            with self.subTest(enabled=enabled, showing=showing):
+                node = self.node(showing)
+                with mock.patch.object(self.runtime, "relative_frame", return_value=None), \
+                     mock.patch.object(self.runtime, "accessible_id", return_value="id"), \
+                     mock.patch.object(self.runtime, "element_value", return_value="value"), \
+                     mock.patch.object(self.runtime, "action_names", return_value=["open"]):
+                    record = self.runtime.record_for(node, 0, [0], None, lightweight_hidden=enabled)
+                self.assertNotIn("detailsOmitted", record)
+                self.assertEqual((record["value"], record["actions"]), ("value", ["open"]))
+                if not enabled:
+                    node.get_state_set.assert_not_called()
+
+    def test_hidden_parent_does_not_prune_visible_menu_children_or_renumber(self):
+        parent = self.node(False)
+        child = self.node(True)
+        parent.get_child_count.return_value = 1
+        parent.get_child_at_index.return_value = child
+        with mock.patch.dict(self.runtime.os.environ, {"OPEN_COMPUTER_USE_LINUX_LIGHTWEIGHT_HIDDEN": "1"}), \
+             mock.patch.object(self.runtime, "relative_frame", return_value=None), \
+             mock.patch.object(self.runtime, "accessible_id", return_value="id"), \
+             mock.patch.object(self.runtime, "element_value", return_value="value"), \
+             mock.patch.object(self.runtime, "action_names", return_value=[]):
+            records, lines = self.runtime.render_tree(parent, None, [0])
+        self.assertEqual([r["index"] for r in records], [0, 1])
+        self.assertTrue(records[0]["detailsOmitted"])
+        self.assertNotIn("detailsOmitted", records[1])
+        self.assertIn("hidden details omitted", lines[0])
+        self.assertEqual(records[1]["runtimeId"], [0, 0])
+
+
 if __name__ == "__main__":
     unittest.main()

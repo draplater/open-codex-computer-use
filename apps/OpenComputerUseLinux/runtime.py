@@ -268,37 +268,45 @@ def parse_text_limit(value, fallback=DEFAULT_TEXT_LIMIT):
     return positive_int(value, fallback)
 
 
-def record_for(node, index, path, window_bounds, text_limit=DEFAULT_TEXT_LIMIT):
-    bounds = relative_frame(node, window_bounds)
+def record_for(node, index, path, window_bounds, text_limit=DEFAULT_TEXT_LIMIT, lightweight_hidden=False):
+    # Only an explicit non-SHOWING state qualifies. Errors/unknown state keep
+    # full details; geometry alone cannot prove that a menu/control is hidden.
+    showing = safe(lambda: node.get_state_set().contains(Atspi.StateType.SHOWING)) if lightweight_hidden else None
+    omit_details = showing is not None and not bool(showing)
+    bounds = None if omit_details else relative_frame(node, window_bounds)
     role = node_role(node)
     return {
         "index": index,
         "runtimeId": path[:],
-        "automationId": accessible_id(node),
+        "automationId": "" if omit_details else accessible_id(node),
         "name": limit_text(node_name(node), text_limit=text_limit),
         "controlType": role,
         "localizedControlType": role,
-        "className": str(safe(node.get_toolkit_name, "") or ""),
-        "value": element_value(node, text_limit=text_limit),
+        "className": "" if omit_details else str(safe(node.get_toolkit_name, "") or ""),
+        "value": "" if omit_details else element_value(node, text_limit=text_limit),
         "nativeWindowHandle": 0,
         "frame": bounds,
-        "actions": action_names(node),
+        "actions": [] if omit_details else action_names(node),
+        **({"detailsOmitted": True} if omit_details else {}),
     }
 
 
 def render_tree(root, window_bounds, root_path, text_limit=DEFAULT_TEXT_LIMIT, max_tree_nodes=MAX_ELEMENTS, max_tree_depth=MAX_DEPTH):
     records = []
     lines = []
+    lightweight_hidden = os.environ.get("OPEN_COMPUTER_USE_LINUX_LIGHTWEIGHT_HIDDEN", "").strip().lower() in {"1", "true", "yes", "on"}
 
     def visit(node, depth, path):
         if len(records) >= max_tree_nodes or depth > max_tree_depth or node is None:
             return
         index = len(records)
-        record = record_for(node, index, path, window_bounds, text_limit=text_limit)
+        record = record_for(node, index, path, window_bounds, text_limit=text_limit, lightweight_hidden=lightweight_hidden)
         records.append(record)
 
         role = record["localizedControlType"] or record["controlType"] or "element"
         title = record["name"] or record["automationId"] or ""
+        if record.get("detailsOmitted"):
+            title += " [hidden details omitted]"
         value_segment = ""
         if record["value"] and record["value"] != title:
             safe_value = record["value"].replace("\r", "\\r").replace("\n", "\\n")

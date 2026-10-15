@@ -898,12 +898,25 @@ def main():
     print(json.dumps(response, separators=(",", ":")))
 
 
+def drain_accessibility_events():
+    from gi.repository import GLib
+    context = GLib.MainContext.default()
+    deadline = time.monotonic() + 0.02
+    for _ in range(1000):
+        if not context.pending() or time.monotonic() >= deadline:
+            break
+        context.iteration(False)
+
+
 def serve(input_stream, output_stream):
     for line in input_stream:
         try:
             operation = json.loads(line)
             if not isinstance(operation, dict):
                 raise ValueError("operation must be a JSON object")
+            # Keep libatspi's event-driven state moving between requests rather
+            # than treating a long-lived GI process as a stateless subprocess.
+            drain_accessibility_events()
             response = perform_operation(operation)
         except Exception as exc:
             response = {"ok": False, "error": str(exc)}

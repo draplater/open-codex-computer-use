@@ -15,3 +15,7 @@ Validation: Go suite and race detector; subprocess fixtures cover reuse, timeout
 This draft builds on #100 so the no-read-back action path also uses the session runner; the first commit belongs to that PR. Its diff will shrink after #100 merges.
 
 Changed areas: Linux native/bridge code and tests, architecture, release and feature documentation.
+
+Follow-up review: drain pending GLib events before each valid streaming request,
+bounded to 20 ms / 1,000 iterations. Add a bounded-drain regression; live AT-SPI
+cache freshness remains an explicit draft acceptance item.

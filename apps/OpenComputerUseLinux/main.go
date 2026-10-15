@@ -139,7 +139,7 @@ func (s *appSnapshot) result() toolCallResult {
 }
 
 type linuxRequest struct {
-	HoldMS *int `json:"hold_ms,omitempty"`
+	HoldMS       *int           `json:"hold_ms,omitempty"`
 	Tool         string         `json:"tool"`
 	App          string         `json:"app,omitempty"`
 	Element      *elementRecord `json:"element,omitempty"`
@@ -1259,7 +1259,7 @@ func toolDefinitions() []toolDefinition {
 			InputSchema: objectSchema(map[string]any{
 				"app":        stringProperty("App name or bundle identifier"),
 				"key":        stringProperty("Key or key-combination to press"),
-				"hold_ms": map[string]any{"type": "integer", "minimum": 1, "maximum": 5000, "description": "Opt-in X11 physical key hold in milliseconds; omitted preserves the existing instantaneous press. Useful for frame-polled applications such as games."},
+				"hold_ms":    map[string]any{"type": "integer", "minimum": 1, "maximum": 5000, "description": "Opt-in X11 physical key hold in milliseconds; omitted preserves the existing instantaneous press. Useful for frame-polled applications such as games."},
 				"key_method": enumStringProperty("Keyboard delivery: auto (default) or sky_key. sky_key is the macOS SkyLight background-window path and is not supported on Linux.", keyMethodValues),
 			}, []string{"app", "key"}),
 		},

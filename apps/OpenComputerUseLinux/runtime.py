@@ -385,50 +385,47 @@ def pixbuf_looks_black(pixbuf):
         return False
 
 
-def focused_summary(app_pid, text_limit=DEFAULT_TEXT_LIMIT):
-    try:
-        root = desktop()
-        for app in iter_apps():
-            if node_pid(app) != app_pid:
-                continue
-            _, win = main_window(app)
-            focused = find_first(
-                win, lambda node: state_contains(node, Atspi.StateType.FOCUSED)
-            )
-            if focused is None:
-                return None
-            role = node_role(focused)
-            name = limit_text(node_name(focused), text_limit=text_limit)
-            return (role + " " + name).strip()
-    except Exception:
+def focus_details(window, text_limit=DEFAULT_TEXT_LIMIT, max_nodes=MAX_ELEMENTS, max_depth=MAX_DEPTH):
+    """Find focus once, within the same node/depth budget as the snapshot."""
+    visited = 0
+    truncated = False
+
+    def visit(node, depth):
+        nonlocal visited, truncated
+        if visited >= max_nodes or depth > max_depth:
+            truncated = True
+            return None
+        visited += 1
+        if node is None:
+            return None
+        if state_contains(node, Atspi.StateType.FOCUSED):
+            return node
+        for index in range(child_count(node)):
+            if visited >= max_nodes:
+                truncated = True
+                break
+            found = visit(child_at(node, index), depth + 1)
+            if found is not None:
+                return found
         return None
 
-
-def selected_text(app_pid, text_limit=DEFAULT_TEXT_LIMIT):
-    try:
-        for app in iter_apps():
-            if node_pid(app) != app_pid:
-                continue
-            _, win = main_window(app)
-            focused = find_first(
-                win, lambda node: state_contains(node, Atspi.StateType.FOCUSED)
-            )
-            if focused is None or not supports_interface(focused, "Text"):
-                return None
-            text_iface = safe(focused.get_text_iface)
-            selections = safe(lambda: Atspi.Text.get_text_selections(text_iface), [])
-            if selections:
-                selection = selections[0]
-                end_offset = selection.end_offset
-                if text_limit is not None:
-                    end_offset = min(end_offset, selection.start_offset + text_limit + 1)
-                value = Atspi.Text.get_text(
-                    text_iface, selection.start_offset, end_offset
-                )
-                return limit_text(value, text_limit=text_limit)
-    except Exception:
-        return None
-    return None
+    focused = visit(window, 0)
+    if focused is None:
+        return None, None, truncated
+    summary = (node_role(focused) + " " + limit_text(node_name(focused), text_limit)).strip()
+    selection = None
+    if supports_interface(focused, "Text"):
+        text_iface = safe(focused.get_text_iface)
+        selections = safe(lambda: Atspi.Text.get_text_selections(text_iface), [])
+        if selections:
+            selected = selections[0]
+            end = selected.end_offset
+            if text_limit is not None:
+                end = min(end, selected.start_offset + text_limit + 1)
+            selection = safe(lambda: Atspi.Text.get_text(text_iface, selected.start_offset, end))
+            if selection is not None:
+                selection = limit_text(selection, text_limit)
+    return summary, selection, False
 
 
 def build_snapshot(query, text_limit=DEFAULT_TEXT_LIMIT, max_tree_nodes=MAX_ELEMENTS, max_tree_depth=MAX_DEPTH):
@@ -443,6 +440,9 @@ def build_snapshot(query, text_limit=DEFAULT_TEXT_LIMIT, max_tree_nodes=MAX_ELEM
         max_tree_nodes=max_tree_nodes,
         max_tree_depth=max_tree_depth,
     )
+    focus, selection, focus_truncated = focus_details(window, text_limit, max_tree_nodes, max_tree_depth)
+    if focus_truncated:
+        lines.append("[Focus search incomplete: node/depth budget reached.]")
     pid = node_pid(app)
     return {
         "app": {
@@ -454,8 +454,8 @@ def build_snapshot(query, text_limit=DEFAULT_TEXT_LIMIT, max_tree_nodes=MAX_ELEM
         "windowBounds": bounds,
         "screenshotPngBase64": capture_window_png(bounds),
         "treeLines": lines,
-        "focusedSummary": focused_summary(pid, text_limit=text_limit),
-        "selectedText": selected_text(pid, text_limit=text_limit),
+        "focusedSummary": focus,
+        "selectedText": selection,
         "elements": records,
     }
 

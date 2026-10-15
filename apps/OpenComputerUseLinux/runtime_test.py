@@ -171,5 +171,57 @@ class RuntimeKeyTests(unittest.TestCase):
         self.assertEqual(self.events, [])
 
 
+class FocusDetailsTests(unittest.TestCase):
+    def setUp(self):
+        self.runtime = load_runtime()
+        self.runtime.Atspi.StateType = types.SimpleNamespace(FOCUSED="focused")
+
+    def node(self, children=(), focused=False):
+        node = mock.Mock()
+        node.get_child_count.return_value = len(children)
+        node.get_child_at_index.side_effect = lambda i: children[i]
+        node.get_state_set.return_value.contains.side_effect = lambda s: focused
+        node.get_name.return_value = "Editor"
+        node.get_role_name.return_value = "text"
+        node.get_interfaces.return_value = ["Text"]
+        return node
+
+    def test_summary_and_selection_share_one_focus_lookup(self):
+        focused = self.node(focused=True)
+        root = self.node([focused])
+        self.runtime.Atspi.Text = types.SimpleNamespace(
+            get_text_selections=lambda _: [types.SimpleNamespace(start_offset=1, end_offset=8)],
+            get_text=lambda _iface, start, end: "hello"[start:end],
+        )
+        summary, selected, truncated = self.runtime.focus_details(root)
+        self.assertEqual((summary, selected, truncated), ("text Editor", "ello", False))
+        root.get_child_at_index.assert_called_once_with(0)
+        focused.get_state_set.assert_called_once()
+
+    def test_node_budget_reports_incomplete_instead_of_absent(self):
+        children = [self.node() for _ in range(100)]
+        root = self.node(children)
+        self.assertEqual(self.runtime.focus_details(root, max_nodes=3), (None, None, True))
+        self.assertEqual(root.get_child_at_index.call_count, 2)
+
+    def test_depth_budget_and_complete_absence(self):
+        root = self.node([self.node([self.node(focused=True)])])
+        self.assertEqual(self.runtime.focus_details(root, max_depth=1), (None, None, True))
+        self.assertEqual(self.runtime.focus_details(self.node()), (None, None, False))
+
+    def test_snapshot_reports_focus_budget_exhaustion(self):
+        with mock.patch.object(self.runtime, "resolve_app"), \
+             mock.patch.object(self.runtime, "main_window", return_value=(0, self.node())), \
+             mock.patch.object(self.runtime, "extents"), \
+             mock.patch.object(self.runtime, "render_tree", return_value=([], [])), \
+             mock.patch.object(self.runtime, "focus_details", return_value=(None, None, True)) as focus, \
+             mock.patch.object(self.runtime, "node_pid", return_value=42), \
+             mock.patch.object(self.runtime, "node_name", return_value="Editor"), \
+             mock.patch.object(self.runtime, "capture_window_png"):
+            state = self.runtime.build_snapshot("Editor", max_tree_nodes=5, max_tree_depth=2)
+        self.assertIn("incomplete", state["treeLines"][0])
+        self.assertEqual(focus.call_args.args[2:], (5, 2))
+
+
 if __name__ == "__main__":
     unittest.main()

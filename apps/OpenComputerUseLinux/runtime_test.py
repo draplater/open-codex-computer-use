@@ -1,5 +1,7 @@
 import importlib.util
 import pathlib
+import os
+import signal
 import sys
 import types
 import unittest
@@ -155,6 +157,27 @@ class RuntimeKeyTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 self.runtime.send_key('x', value)
         self.assertEqual(self.events, [])
+
+    def test_release_failure_is_reported_and_modifier_unlocked(self):
+        self.prepare_x11()
+        def deliver(*args):
+            self.events.append(args)
+            return args[2] != 'RELEASE'
+        self.runtime.Atspi.generate_keyboard_event = deliver
+        with mock.patch.object(self.runtime.time, 'sleep'):
+            with self.assertRaisesRegex(RuntimeError, 'release failed'):
+                self.runtime.send_key('ctrl+x', 50)
+        self.assertEqual(self.events[-1], (4, None, 'UNLOCKMODIFIERS'))
+
+    def test_sigterm_during_hold_releases_and_restores_handler(self):
+        self.prepare_x11()
+        self.runtime.Atspi.generate_keyboard_event = lambda *args: self.events.append(args) or True
+        before = signal.getsignal(signal.SIGTERM)
+        with mock.patch.object(self.runtime.time, 'sleep', side_effect=lambda _: os.kill(os.getpid(), signal.SIGTERM)):
+            with self.assertRaises(KeyboardInterrupt):
+                self.runtime.send_key('ctrl+x', 50)
+        self.assertEqual(self.events[-2:], [(53, None, 'RELEASE'), (4, None, 'UNLOCKMODIFIERS')])
+        self.assertEqual(signal.getsignal(signal.SIGTERM), before)
 
     def test_modifiers_are_held_around_the_key(self):
         self.runtime.send_key("ctrl+shift+Tab")

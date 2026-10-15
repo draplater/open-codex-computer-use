@@ -4,6 +4,7 @@ import base64
 import json
 import math
 import os
+import signal
 import sys
 import time
 import traceback
@@ -706,12 +707,19 @@ def send_key(key, hold_ms=None):
         Atspi.generate_keyboard_event(mask, None, Atspi.KeySynthType.LOCKMODIFIERS)
     try:
         if hardware is not None:
+            def terminate_hold(_signal, _frame):
+                raise KeyboardInterrupt("Key hold terminated")
+            previous_terminate = signal.signal(signal.SIGTERM, terminate_hold)
             try:
                 if not Atspi.generate_keyboard_event(hardware, None, Atspi.KeySynthType.PRESS):
                     raise RuntimeError("X11 key press failed")
                 time.sleep(hold_ms / 1000)
             finally:
-                Atspi.generate_keyboard_event(hardware, None, Atspi.KeySynthType.RELEASE)
+                try:
+                    if not Atspi.generate_keyboard_event(hardware, None, Atspi.KeySynthType.RELEASE):
+                        raise RuntimeError("X11 key release failed; key state may remain pressed")
+                finally:
+                    signal.signal(signal.SIGTERM, previous_terminate)
         elif len(normalized) == 1 and not mask:
             Atspi.generate_keyboard_event(0, normalized, Atspi.KeySynthType.STRING)
         else:

@@ -2,6 +2,8 @@
 """Exercise native Linux MCP actions against an isolated real GTK fixture."""
 
 import argparse
+from contextlib import ExitStack
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -11,9 +13,10 @@ import subprocess
 import sys
 import tempfile
 import time
+from unittest import mock
 
 
-def fixture(name, state_file, focus_checks=False):
+def fixture(name, state_file, focus_checks=False, hidden_checks=False):
     import gi
 
     gi.require_version("Gtk", "3.0")
@@ -25,7 +28,22 @@ def fixture(name, state_file, focus_checks=False):
     window = Gtk.Window(title=name)
     window.set_default_size(500, 240)
     box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, margin=20)
-    window.add(box)
+    notebook = None
+    if hidden_checks:
+        notebook = Gtk.Notebook()
+        window.add(notebook)
+        notebook.append_page(box, Gtk.Label(label="Main page"))
+        hidden_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, margin=20)
+        hidden_entry = Gtk.Entry(text="hidden-value-中文🙂")
+        hidden_entry.get_accessible().set_name("Hidden input")
+        hidden_button = Gtk.Button(label="Return page")
+        hidden_box.pack_start(hidden_entry, False, False, 0)
+        hidden_box.pack_start(hidden_button, False, False, 0)
+        notebook.append_page(hidden_box, Gtk.Label(label="Other page"))
+        reveal = Gtk.Button(label="Reveal page")
+        box.pack_start(reveal, False, False, 0)
+    else:
+        window.add(box)
     entry = Gtk.Entry()
     entry.get_accessible().set_name("Read-back input")
     button = Gtk.Button(label="Increment")
@@ -39,6 +57,8 @@ def fixture(name, state_file, focus_checks=False):
         state["focused"] = entry.has_focus()
         bounds = entry.get_selection_bounds()
         state["selected"] = entry.get_text()[bounds[0]:bounds[1]] if bounds else ""
+        if notebook is not None:
+            state["page"] = notebook.get_current_page()
         temporary = state_file.with_suffix(".tmp")
         temporary.write_text(json.dumps(state))
         temporary.replace(state_file)
@@ -60,6 +80,10 @@ def fixture(name, state_file, focus_checks=False):
     entry.connect("notify::selection-bound", publish)
     entry.connect("notify::cursor-position", publish)
     entry.connect("notify::has-focus", publish)
+    if notebook is not None:
+        reveal.connect("clicked", lambda *_: notebook.set_current_page(1))
+        hidden_button.connect("clicked", lambda *_: notebook.set_current_page(0))
+        notebook.connect("switch-page", lambda *_: GLib.idle_add(publish))
     window.connect("destroy", Gtk.main_quit)
     window.show_all()
     entry.grab_focus()
@@ -89,8 +113,9 @@ def wait_for(predicate, description):
 
 
 class MCP:
-    def __init__(self, native, read_back, stderr):
+    def __init__(self, native, read_back, stderr, env_overrides=None):
         env = dict(os.environ)
+        env.update(env_overrides or {})
         env.pop("OPEN_COMPUTER_USE_ACTION_READ_BACK", None)
         if read_back is not None:
             env["OPEN_COMPUTER_USE_ACTION_READ_BACK"] = read_back
@@ -183,7 +208,84 @@ def check_focus(client, name, state_file):
     print("Focus smoke: node/depth limits, Unicode selection, text limit and focus summary passed.")
 
 
-def smoke(native, focus_checks=False):
+def check_hidden(client, native, name, state_file, stderr):
+    # Import the production bridge and wrap its real property helpers. All
+    # objects below are remote GTK/AT-SPI accessibles, not synthetic records.
+    runtime_path = Path(__file__).resolve().parents[2] / "apps/OpenComputerUseLinux/runtime.py"
+    spec = importlib.util.spec_from_file_location("gtk_smoke_runtime", runtime_path)
+    runtime = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(runtime)
+    app = runtime.resolve_app(name)
+    window_index, window = runtime.main_window(app)
+    bounds = runtime.extents(window)
+    flag = "OPEN_COMPUTER_USE_LINUX_LIGHTWEIGHT_HIDDEN"
+    helpers = ("relative_frame", "accessible_id", "element_value", "action_names")
+
+    def render(enabled):
+        with ExitStack() as stack:
+            stack.enter_context(mock.patch.dict(os.environ, {flag: "1" if enabled else "0"}))
+            calls = [stack.enter_context(mock.patch.object(runtime, key, wraps=getattr(runtime, key)))
+                     for key in helpers]
+            records, lines = runtime.render_tree(window, bounds, [window_index])
+            return records, lines, [query.call_count for query in calls]
+
+    full, _, full_calls = render(False)
+    light, _, light_calls = render(True)
+    identity = ("index", "runtimeId", "name", "controlType", "localizedControlType")
+    assert [[row[key] for key in identity] for row in full] == [
+        [row[key] for key in identity] for row in light], (full, light)
+    omitted = [row for row in light if row.get("detailsOmitted")]
+    assert any(row["name"] == "Hidden input" for row in omitted), light
+    assert next(row for row in full if row["name"] == "Hidden input")["value"] == "hidden-value-中文🙂", full
+    for original, row in zip(full, light):
+        node = runtime.resolve_path(app, row["runtimeId"])
+        showing = node.get_state_set().contains(runtime.Atspi.StateType.SHOWING)
+        assert bool(row.get("detailsOmitted")) == (not showing), row
+        if row.get("detailsOmitted"):
+            assert row["frame"] is None and row["value"] == "" and row["actions"] == [], row
+            assert row["className"] == "" and row["automationId"] == "", row
+        else:
+            assert row == original, (original, row)
+    assert full_calls == [len(full)] * len(helpers), full_calls
+    assert light_calls == [len(full) - len(omitted)] * len(helpers), light_calls
+    print(f"Real AT-SPI tree: {len(full)} stable nodes, {len(omitted)} hidden; "
+          f"property helpers {sum(full_calls)} → {sum(light_calls)} (not a latency benchmark).")
+
+    baseline = MCP(native, "0", stderr, {flag: "0"})
+    try:
+        default = baseline.call("get_app_state", name)
+        optimized = client.call("get_app_state", name)
+        expect_snapshot(default)
+        expect_snapshot(optimized)
+        assert "[hidden details omitted]" not in text(default), text(default)
+        assert "hidden-value-中文🙂" in text(default), text(default)
+        assert "hidden-value-中文🙂" not in text(optimized), text(optimized)
+        assert "[hidden details omitted]" in text(optimized), text(optimized)
+        for title in ("Read-back input", "Increment", "Hidden input", "Return page", "Reveal page"):
+            assert element_index(default, title) == element_index(optimized, title), title
+    finally:
+        baseline.close()
+
+    def page_is(number):
+        return json.loads(state_file.read_text())["page"] == number
+
+    result = client.call("click", name, element_index=element_index(optimized, "Reveal page"),
+                         click_method="accessibility")
+    assert not result.get("isError"), result
+    wait_for(lambda: page_is(1), "real notebook reveal")
+    shown = client.call("get_app_state", name)
+    expect_snapshot(shown)
+    row = next(line for line in text(shown).splitlines()
+               if re.match(r"\s*\d+\s", line) and "Hidden input" in line)
+    assert "hidden-value-中文🙂" in row and "[hidden details omitted]" not in row and "Frame:" in row, row
+    result = client.call("click", name, element_index=element_index(shown, "Return page"),
+                         click_method="accessibility")
+    assert not result.get("isError"), result
+    wait_for(lambda: page_is(0), "real notebook return")
+    print("Native MCP: default/opt-in output, stable indexes, page changes and full detail restoration passed.")
+
+
+def smoke(native, focus_checks=False, hidden_checks=False):
     with tempfile.TemporaryDirectory(prefix="ocu-read-back-smoke-") as directory:
         directory = Path(directory)
         state_file = directory / "state.json"
@@ -192,17 +294,22 @@ def smoke(native, focus_checks=False):
             arguments = [sys.executable, __file__, "--fixture", name, "--state-file", str(state_file)]
             if focus_checks:
                 arguments.append("--focus-checks")
+            if hidden_checks:
+                arguments.append("--hidden-checks")
             process = subprocess.Popen(arguments, stderr=stderr)
             clients = []
             try:
                 wait_for(state_file.exists, "GTK fixture startup")
-                client = MCP(native, " OFF ", stderr)
+                overrides = {"OPEN_COMPUTER_USE_LINUX_LIGHTWEIGHT_HIDDEN": "1"} if hidden_checks else None
+                client = MCP(native, " OFF ", stderr, overrides)
                 clients.append(client)
                 # AT-SPI registration follows GTK startup asynchronously.
                 wait_for(lambda: not client.call("get_app_state", name).get("isError"), "AT-SPI registration")
                 if focus_checks:
                     check_focus(client, name, state_file)
                     return
+                if hidden_checks:
+                    check_hidden(client, native, name, state_file, stderr)
                 observed = client.call("get_app_state", name)
                 expect_snapshot(observed)
                 input_index = element_index(observed, "Read-back input")
@@ -271,12 +378,14 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--native")
     parser.add_argument("--fixture")
-    parser.add_argument("--focus-checks", action="store_true")
+    checks = parser.add_mutually_exclusive_group()
+    checks.add_argument("--focus-checks", action="store_true")
+    checks.add_argument("--hidden-checks", action="store_true")
     parser.add_argument("--state-file", type=Path)
     args = parser.parse_args()
     if args.fixture:
-        fixture(args.fixture, args.state_file, args.focus_checks)
+        fixture(args.fixture, args.state_file, args.focus_checks, args.hidden_checks)
     else:
         if not args.native:
             parser.error("--native is required")
-        smoke(str(Path(args.native).resolve()), args.focus_checks)
+        smoke(str(Path(args.native).resolve()), args.focus_checks, args.hidden_checks)

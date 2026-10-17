@@ -229,6 +229,33 @@ class HiddenDetailsTests(unittest.TestCase):
         self.assertIn("hidden details omitted", lines[0])
         self.assertEqual(records[1]["runtimeId"], [0, 0])
 
+    def test_failed_state_reads_keep_full_details(self):
+        for failure in ("state-set", "missing-state-set", "contains"):
+            with self.subTest(failure=failure):
+                node = self.node(False)
+                if failure == "state-set":
+                    node.get_state_set.side_effect = RuntimeError("state unavailable")
+                elif failure == "missing-state-set":
+                    node.get_state_set.return_value = None
+                else:
+                    node.get_state_set.return_value.contains.side_effect = RuntimeError("state unavailable")
+                with mock.patch.object(self.runtime, "relative_frame", return_value=None), \
+                     mock.patch.object(self.runtime, "element_value", return_value="retained"), \
+                     mock.patch.object(self.runtime, "action_names", return_value=["click"]):
+                    record = self.runtime.record_for(node, 0, [0], None, lightweight_hidden=True)
+                self.assertNotIn("detailsOmitted", record)
+                self.assertEqual((record["value"], record["actions"]), ("retained", ["click"]))
+
+    def test_showing_node_with_negative_geometry_keeps_details(self):
+        node = self.node(True)
+        bounds = {"x": -100, "y": -200, "width": 30, "height": 40}
+        with mock.patch.object(self.runtime, "relative_frame", return_value=bounds), \
+             mock.patch.object(self.runtime, "element_value", return_value="visible"), \
+             mock.patch.object(self.runtime, "action_names", return_value=["click"]):
+            record = self.runtime.record_for(node, 0, [0], None, lightweight_hidden=True)
+        self.assertNotIn("detailsOmitted", record)
+        self.assertEqual((record["frame"], record["value"], record["actions"]), (bounds, "visible", ["click"]))
+
 
 class FocusDetailsTests(unittest.TestCase):
     def setUp(self):

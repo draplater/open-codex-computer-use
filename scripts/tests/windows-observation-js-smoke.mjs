@@ -5,7 +5,6 @@ import { readFileSync } from "node:fs";
 import { JsonLinePeer, WorkerJavaScriptSession } from "../node-repl/open-computer-use-repl.mjs";
 
 const [nativePath, app, stateFile] = process.argv.slice(2);
-const initialValue = JSON.parse(readFileSync(stateFile, "utf8")).text;
 const native = new JsonLinePeer({ command: nativePath, args: ["mcp"], env: process.env });
 let session;
 async function run(code, expectedError) {
@@ -21,8 +20,7 @@ try {
   const ax = await run(`var app = await cua.getApp(${JSON.stringify(app)}, {initialState:false});
     var state = await app.getAXState({includeScreenshot:false});
     function inputIndex(state) {
-      var line = state.split("\\n").find(line => /^\\s*\\d+\\s/.test(line) &&
-        (line.includes("Observation input") || line.includes(${JSON.stringify(initialValue)})));
+      var line = state.split("\\n").find(line => /^\\s*\\d+\\s+edit Observation input(?:\\s|$)/.test(line));
       if(!line) throw Error("Fixture input not found in AX");
       return line.match(/^\\s*(\\d+)/)[1];
     }

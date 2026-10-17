@@ -39,8 +39,7 @@ function Call-Tool($tool, $arguments) {
 function Text($result) { ($result.content | Where-Object type -eq "text" | ForEach-Object text) -join "`n" }
 function Images($result) { @($result.content | Where-Object type -eq "image") }
 function Input-Index($result) {
-    # Permit the initial text as a fallback for older UIA providers.
-    $matches = [regex]::Matches((Text $result), '(?m)^\s*(\d+)\s+[^\r\n]*(?:Observation input|initial-value)(?:\s|$)')
+    $matches = [regex]::Matches((Text $result), '(?m)^\s*(\d+)\s+edit Observation input(?:\s|$)')
     Assert ($matches.Count -eq 1) (Text $result)
     $matches[0].Groups[1].Value
 }

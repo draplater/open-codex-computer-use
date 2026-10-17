@@ -6,6 +6,11 @@ import ImageIO
 struct VisualCursorTarget: Equatable {
     let point: CGPoint
     let window: CursorTargetWindow?
+    /// The same point expressed relative to the window frame the snapshot
+    /// reported. The overlay keeps it so a window that moves before or during
+    /// the action can be re-derived instead of drawing on the display the
+    /// window just left.
+    var anchor: CursorRestingAnchor? = nil
 }
 
 public enum ClickMethod: String, CaseIterable, Sendable {
@@ -149,18 +154,43 @@ func inputEventPoint(
     point
 }
 
+/// Anchor for a cursor target built from a window-local point.
+///
+/// The click paths derive their point from the snapshot, so they carry the
+/// window frame that point belongs to; the overlay needs both to follow the
+/// window if it moves before or during the action.
+func makeCursorWindowAnchor(snapshot: AppSnapshot, windowLocalPoint: CGPoint) -> CursorRestingAnchor? {
+    guard let windowID = snapshot.targetWindowID, let windowBounds = snapshot.windowBounds else {
+        return nil
+    }
+
+    // Registering here keeps the live-frame source next to the anchor that
+    // depends on it: the window list can lag a move by about a second, so the
+    // accessibility element is what makes the re-derivation immediate.
+    CursorWindowFrameTracker.register(windowID: windowID, element: snapshot.windowElement)
+
+    return CursorRestingAnchor(
+        windowID: windowID,
+        layer: snapshot.targetWindowLayer ?? 0,
+        windowLocalPoint: windowLocalPoint,
+        windowBounds: windowBounds
+    )
+}
+
 func makeVisualCursorTarget(
     at point: CGPoint,
     targetWindowID: CGWindowID?,
     targetWindowLayer: Int?,
-    screenMappings: [VisualCursorScreenMapping] = currentVisualCursorScreenMappings()
+    screenMappings: [VisualCursorScreenMapping] = currentVisualCursorScreenMappings(),
+    anchor: CursorRestingAnchor? = nil
 ) -> VisualCursorTarget {
     VisualCursorTarget(
         point: screenStatePointToAppKitGlobalPoint(
             fromScreenStatePoint: point,
             screenMappings: screenMappings
         ),
-        window: targetWindowID.map { CursorTargetWindow(windowID: $0, layer: targetWindowLayer ?? 0) }
+        window: targetWindowID.map { CursorTargetWindow(windowID: $0, layer: targetWindowLayer ?? 0) },
+        anchor: anchor
     )
 }
 
@@ -183,7 +213,15 @@ func makeVisualCursorTarget(
         at: point,
         targetWindowID: targetWindowID,
         targetWindowLayer: targetWindowLayer,
-        screenMappings: screenMappings
+        screenMappings: screenMappings,
+        anchor: targetWindowID.map { windowID in
+            CursorRestingAnchor(
+                windowID: windowID,
+                layer: targetWindowLayer ?? 0,
+                windowLocalPoint: CGPoint(x: localFrame.midX, y: localFrame.midY),
+                windowBounds: windowBounds
+            )
+        }
     )
 }
 
@@ -257,6 +295,23 @@ func appendingDragDeliveryNote(to result: ToolCallResult, path: DragDeliveryPath
     return ToolCallResult(content: content, isError: result.isError)
 }
 
+func selectTextErrorMessage(_ error: TextSelectionResolverError, elementIndex: String) -> String {
+    switch error {
+    case .emptyText:
+        return "select_text requires non-empty text"
+    case .notFound:
+        return "select_text could not find the requested text in element \(elementIndex); pass text exactly as it appears in the accessibility tree"
+    case .ambiguous(let occurrenceCount):
+        return "select_text found \(occurrenceCount) matches in element \(elementIndex); provide prefix or suffix to disambiguate the target"
+    }
+}
+
+func selectTextUnreadableValueErrorMessage(elementIndex: String) -> String {
+    return "element \(elementIndex) has no readable accessibility text value, so select_text cannot locate the requested text"
+}
+
+/// Inserts a verification note after the snapshot text and before any screenshot, matching
+/// `appendingDragDeliveryNote` so `primaryText` stays the snapshot for existing consumers.
 func screenshotPixelScale(
     screenshotPixelSize: CGSize?,
     windowBounds: CGRect?
@@ -625,7 +680,8 @@ public final class ComputerUseService {
             let cursorTarget = makeVisualCursorTarget(
                 at: targetPoint,
                 targetWindowID: snapshot.targetWindowID,
-                targetWindowLayer: snapshot.targetWindowLayer
+                targetWindowLayer: snapshot.targetWindowLayer,
+                anchor: makeCursorWindowAnchor(snapshot: snapshot, windowLocalPoint: windowPoint)
             )
 
             moveVisualCursor(to: cursorTarget)
@@ -686,7 +742,8 @@ public final class ComputerUseService {
             let cursorTarget = makeVisualCursorTarget(
                 at: targetPoint,
                 targetWindowID: snapshot.targetWindowID,
-                targetWindowLayer: snapshot.targetWindowLayer
+                targetWindowLayer: snapshot.targetWindowLayer,
+                anchor: makeCursorWindowAnchor(snapshot: snapshot, windowLocalPoint: point)
             )
 
             moveVisualCursor(to: cursorTarget)
@@ -957,10 +1014,83 @@ public final class ComputerUseService {
         return try actionResult(for: query)
     }
 
+    public func selectText(
+        app query: String,
+        elementIndex: String,
+        text: String,
+        prefix: String?,
+        suffix: String?,
+        selection: TextSelectionMode
+    ) throws -> ToolCallResult {
+        let snapshot = try snapshotForAction(app: query, elementIndex: elementIndex)
+        let record = try lookupElement(snapshot: snapshot, index: elementIndex)
+
+        if snapshot.mode == .fixture {
+            guard let identifier = record.identifier, identifier == "fixture-input",
+                  let state = try FixtureBridge.readState(),
+                  let value = state.elements.first(where: { $0.identifier == identifier })?.value else {
+                throw ComputerUseError.invalidArguments("fixture select_text requires a readable input element")
+            }
+            let target = try resolveTextSelection(value: value, text: text, prefix: prefix, suffix: suffix,
+                                                 selection: selection, elementIndex: elementIndex)
+            let cursorTarget = visualCursorTarget(for: record, snapshot: snapshot)
+            moveVisualCursor(to: cursorTarget)
+            defer { settleVisualCursor(at: cursorTarget) }
+            try FixtureBridge.post(FixtureCommand(kind: "select_text", identifier: identifier, value: text,
+                                                 selection: selection.rawValue, prefix: prefix, suffix: suffix))
+            let deadline = Date().addingTimeInterval(1)
+            while Date() < deadline {
+                if let applied = try FixtureBridge.readState(), applied.focusedIdentifier == identifier,
+                   applied.selectedRangeLocation == target.location, applied.selectedRangeLength == target.length,
+                   let current = applied.elements.first(where: { $0.identifier == identifier })?.value,
+                   current.utf16.elementsEqual(value.utf16) {
+                    return try actionResult(for: query, recoveryPolicy: .readOnly)
+                }
+                Thread.sleep(forTimeInterval: 0.01)
+            }
+            throw ComputerUseError.message("select_text could not verify fixture selection")
+        }
+
+        try requireUsableComputerUseSession()
+        guard let element = record.element else {
+            throw ComputerUseError.stateUnavailable("element \(elementIndex) has no backing accessibility object")
+        }
+        guard let value = stringValue(of: element, attribute: kAXValueAttribute) else {
+            throw ComputerUseError.message(selectTextUnreadableValueErrorMessage(elementIndex: elementIndex))
+        }
+        let target = try resolveTextSelection(value: value, text: text, prefix: prefix, suffix: suffix,
+                                             selection: selection, elementIndex: elementIndex)
+        var settable = DarwinBoolean(false)
+        guard AXUIElementIsAttributeSettable(element, kAXSelectedTextRangeAttribute as CFString, &settable) == .success,
+              settable.boolValue else {
+            throw ComputerUseError.message("element \(elementIndex) does not support setting an accessibility text range")
+        }
+        let cursorTarget = visualCursorTarget(for: record, snapshot: snapshot)
+        moveVisualCursor(to: cursorTarget)
+        defer { settleVisualCursor(at: cursorTarget) }
+        try applyVerifiedTextSelection(
+            target: target, originalValue: value,
+            validate: { try requireUsableComputerUseSession() },
+            readValue: { stringValue(of: element, attribute: kAXValueAttribute) },
+            writeRange: { try AccessibilityTextSelection.writeRange($0, to: element) },
+            readRange: { AccessibilityTextSelection.readRange(of: element) }
+        )
+        return try actionResult(for: query, recoveryPolicy: .readOnly)
+    }
+
+    private func resolveTextSelection(value: String, text: String, prefix: String?, suffix: String?,
+                                      selection: TextSelectionMode, elementIndex: String) throws -> TextSelectionTarget {
+        do {
+            return try TextSelectionResolver.resolve(value: value, text: text, prefix: prefix, suffix: suffix, selection: selection)
+        } catch let error as TextSelectionResolverError {
+            throw ComputerUseError.message(selectTextErrorMessage(error, elementIndex: elementIndex))
+        }
+    }
+
     /// Find controls in the app's current window by text and/or role, using the
     /// app's own accessibility search where it offers one. No tree render, no
     /// screenshot. Each result carries an `index` the existing element actions
-    /// (click, set_value, scroll, perform_secondary_action) accept.
+    /// (click, set_value, select_text, scroll, perform_secondary_action) accept.
     public func query(
         app query: String,
         text: String? = nil,
@@ -1016,6 +1146,7 @@ public final class ComputerUseService {
     /// the normal current snapshot.
     private func snapshotForAction(app query: String, elementIndex: String?) throws -> AppSnapshot {
         if let elementIndex, let index = Int(elementIndex), index > TargetedElementRegistry<TargetedElement>.indexBase {
+            try requireUsableComputerUseSession()
             let app = try AppDiscovery.resolveRunning(query)
             let target = try targetedElements.resolve(index, app: TargetedAppIdentity(app: app))
             do {
@@ -1943,7 +2074,15 @@ public final class ComputerUseService {
     }
 
     private func visualCursorTarget(for record: ElementRecord, snapshot: AppSnapshot) -> VisualCursorTarget? {
-        makeVisualCursorTarget(
+        // The accessibility element is the overlay's only immediate source of
+        // truth for the window frame: the window list can keep reporting the
+        // pre-move origin for about a second.
+        CursorWindowFrameTracker.register(
+            windowID: snapshot.targetWindowID,
+            element: snapshot.windowElement
+        )
+
+        return makeVisualCursorTarget(
             localFrame: record.localFrame,
             windowBounds: snapshot.windowBounds,
             targetWindowID: snapshot.targetWindowID,
@@ -1962,7 +2101,7 @@ public final class ComputerUseService {
         }
 
         VisualCursorSupport.performOnMain {
-            SoftwareCursorOverlay.moveCursor(to: target.point, in: target.window)
+            SoftwareCursorOverlay.moveCursor(to: target.point, in: target.window, anchor: target.anchor)
         }
     }
 
@@ -1972,7 +2111,7 @@ public final class ComputerUseService {
         }
 
         VisualCursorSupport.performOnMain {
-            SoftwareCursorOverlay.settle(at: target.point, in: target.window)
+            SoftwareCursorOverlay.settle(at: target.point, in: target.window, anchor: target.anchor)
         }
     }
 
@@ -1986,7 +2125,8 @@ public final class ComputerUseService {
                 at: target.point,
                 clickCount: clickCount,
                 mouseButton: mouseButton,
-                in: target.window
+                in: target.window,
+                anchor: target.anchor
             )
         }
     }

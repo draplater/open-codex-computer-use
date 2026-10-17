@@ -75,6 +75,7 @@
 - 对真实 app 的 `get_app_state` / action tool 入口，当前只保留一层密码管理器 bundle denylist：bundle-id 直传时直接返回 safety denial；名称匹配时默认不解析到这些 app。终端、Chrome / Atlas 和系统组件不再属于内置阻止目标。
 - 普通 app 的 element frame 当前按“窗口左上角为原点”的 window-relative 坐标输出，便于后续把 `element_index` 和截图坐标统一到同一套参考系。
 - `click` / `set_value` 在执行真实动作前后，会额外驱动一层透明 `SoftwareCursorOverlay` window：两者的移动阶段现在共用一条 heading-driven 的官方风格 motion 内核，显式把“当前 cursor 朝向”和“最终 resting pose”一起喂给选路器，优先生成需要时先掉头、再沿车头方向推进的 C 形/单侧大弧轨迹；首次显示时按官方 binary 的 fresh state 从 AppKit 全局 `(0,0)` window origin 生成起点，后续动作继续复用上一帧 visible tip。真正显示出来的 cursor 不再直接等于 path sample，而是经过一层独立的 visual dynamics 状态，把 visible tip、velocity、angle 和 fog/offset 持续推进。`click` 结尾会衔接 click pulse 和更明显但仍然很小的 rotate wobble，`set_value` 则只做 settle / idle，不给 pulse；两者收尾后会在目标点继续保持 idle 状态，等待下一次动作时 tip 保持 anchored、只保留可感知的小角度摆动；只有连续 30 秒没有新动作时才做 cleanup，这样连续 tool call 不会反复从 fresh `(0,0)` 起步；如果宿主在任务 / turn 结束时发出 `turn-ended`，cursor 会立即消失并清掉本轮位置状态。
+- overlay 用目标点相对窗口的锚点跟随窗口移动；行进、settle、点击反馈和 idle 都读取最新缓存帧，发现位置变化时直接重定位可见 tip 并清掉旧速度。窗口帧在后台串行读取，最多 30 Hz、同时最多一个请求，避免 AX 阻塞渲染线程；优先读取快照持有的 AX 窗口，仅在没有 AX 元素时使用窗口列表，读取失败保留最后有效帧。只保留当前窗口的追踪状态，reset / idle 超时后释放；这层跟随只调整显示位置，输入投递仍走既有路径。
 - overlay 的 visual style 不再自己从官方 app bundle 裁 `SoftwareCursor` 小图；主 MCP runtime 现在和 `CursorMotion` 一样优先渲染仓库里沉淀的 `official-software-cursor-window-252.png` baseline，只有资源缺失时才退回 `OpenComputerUseKit` 内部的程序化 pointer/fog fallback。命中点 anchor 仍固定在 `126x126` 画布里的同一组 tip-offset 上；glyph 自身的 neutral heading 继续沿用 `CursorMotion` / 官方 baseline 的 `-3π/4`。主 runtime overlay window 按 AppKit 全局坐标移动，因此在把 AX / `CGWindowList` 产出的 y-down screen-space 点击目标喂给 overlay 之前，会先转换成对应屏幕的 AppKit 全局坐标；路径选路用屏幕上实际可见的 AppKit forward heading，进入 visual dynamics / render state 前则把 velocity 的 y 轴翻回 CursorMotion 的 y-down screen state，再交给 AppKit 绘制层做角度和 `dy` 翻转。程序化 fallback 保留 neutral artwork correction，把它的天然轮廓轴对齐到 `CursorMotion` / 官方 baseline 的 `-3π/4` forward 方向，但不让实验线依赖 runtime 代码。
 - overlay 的层级不再固定 `.floating`；现在会跟随 snapshot 命中的目标 window id / layer，把自己排到该目标 window 之上，而不是粗暴压到所有前台 app 最上层。
 - overlay 的曲线路径不再只按固定 Bezier 模板生成；当前主线采用 reverse-engineering 约束下的 heading-driven candidate 族，候选只保留 `direct` / `turn` / `brake` / `orbit` 这些能稳定产出单侧主弧的 family，并继续保留 target-window 命中策略作为同类候选间的 tie-break。原始 binary lift 恢复出来的 `20` 条路径和 score 仍然保留在独立的 `StandaloneCursor` viewer / Python 重建脚本里，用于对照分析，不再直接作为 runtime 默认 chooser。
@@ -132,6 +133,7 @@
 - Bound Linux focus lookup and reuse its result：[bounded-focus](linux-bounded-focus.md)。
 
 - Linux runtime 位于 `apps/OpenComputerUseLinux`，以 Go 维护 CLI、`call --calls` sequence、MCP JSON-RPC、tool schema 和进程内 snapshot cache。
+- Linux 支持与 macOS 一致的 `OPEN_COMPUTER_USE_ACTION_READ_BACK`：默认保持动作后等待并返回完整快照；设置为 `0`、`false`、`no` 或 `off`（忽略大小写与首尾空白）时，成功动作只返回 `ok`，跳过回读等待、AX、焦点/选区和截图采集，也不覆盖最后一次显式观察的索引缓存。REPL adapter 已自动设置此开关；调用方应在需要观察时显式调用 `get_app_state` / `getAXState()`，并在界面变化后刷新索引。`ok` 仅表示动作调用完成，不代表界面已完成更新或任务成功。显式观察不受开关影响，仍返回完整快照。
 - 构建入口是 `scripts/build-open-computer-use-linux.sh --arch arm64|amd64`，默认输出到 `dist/linux/<arch>/open-computer-use`；npm release package 会把两个 Linux artifact 内置到已有 root/alias packages，Node launcher 按 `process.platform/process.arch` 自动选择。
 - Go runtime 通过 `go:embed` 带上 `runtime.py`，执行 tool call 时临时落盘并调用 `python3`。Python bridge 使用 GNOME/GObject Introspection 暴露的 AT-SPI2 接口做 app/window discovery、accessibility tree rendering、semantic action、editable text、value set，以及 best-effort 的 key/mouse fallback；文本能力通过 `Accessible.get_interfaces()` 检测 `Text` / `EditableText`，不依赖不同 PyGObject 版本未必存在的便捷属性。
 - Linux 上最接近 macOS AX 的是 AT-SPI2/D-Bus accessibility，而不是一套统一的后台键鼠输入模型。第一版优先使用元素暴露的 AT-SPI action、EditableText 和 Value 接口；coordinate `click` / `drag` 与 `press_key` 使用 AT-SPI event synthesis fallback，在 Wayland 下只能按 best-effort 处理。`press_key` 的具名键以 keysym 配合 `KeySynthType.SYM` 发送，修饰键以 X modifier mask 配合 `LOCKMODIFIERS` / `UNLOCKMODIFIERS` 保持；`PRESS` / `RELEASE` / `PRESSRELEASE` 只接受硬件 keycode，不能传 keysym。
@@ -139,7 +141,7 @@
 - `get_app_state` 的 accessibility tree 在 GTK/GNOME app 上可能很深，Linux bridge 使用与 macOS / Windows 一致的 1200 节点、64 层默认 tree budget，并支持显式提高 `max_tree_nodes` / `max_tree_depth`。截图通过 GDK root window best-effort capture；GNOME Wayland 可能返回黑图，bridge 会检测全黑采样并省略 image block。
 - 这 9 个 tool 的协议面与 macOS / Windows 保持一致：`list_apps`、`get_app_state`、`click`、`perform_secondary_action`、`scroll`、`drag`、`type_text`、`press_key`、`set_value`。其中 element-targeted action 会优先复用上一轮 `get_app_state` 的 runtime path metadata，coordinate action 使用 screenshot/window-relative 坐标。
 - Linux `click_method=accessibility` 映射到 AT-SPI action，`global` 映射到 AT-SPI mouse synthesis 并要求全局指针环境变量；AT-SPI 没有等价的进程定向 mouse dispatch，因此 `app_post` 和 macOS-only 的 `sky_click` 会在 snapshot lookup 前明确返回 unsupported，`key_method=sky_key` 也一样。`auto` 仍保持 AT-SPI action 优先、mouse synthesis fallback 的现有行为。
-- 当前 Linux 侧仍是功能性第一版：没有 visual cursor overlay、没有 installer/desktop entry，也没有独立 Linux fixture。后续 TODO 记录在 `docs/exec-plans/active/20260422-linux-computer-use-runtime.md`。
+- Linux 动作回读已有独立 GTK fixture，可在私有 D-Bus / Xvfb 中通过 native MCP 复测；运行方式见 [Linux 动作回读](linux-action-read-back.md)。当前 Linux 侧仍是功能性第一版：没有 visual cursor overlay、没有 installer/desktop entry，也没有覆盖全部工具的 Linux fixture。后续 TODO 记录在 `docs/exec-plans/active/20260422-linux-computer-use-runtime.md`。
 
 ## macOS Locked Use 实验
 
@@ -195,3 +197,7 @@ macOS 在原有 9 个工具之外新增 `query`，按文字或角色查找目标
 ## 结构化权限查询
 
 macOS `doctor --json` 在 CLI 和 app-agent proxy 路径复用 `PermissionDiagnostics`，只输出一份 JSON 快照，不打开 onboarding。字段为 `platform: "macos"`、`accessibilityTrusted`、`screenCaptureGranted`、`allGranted` 和 `missingPermissions`（`accessibility` / `screenRecording`）。缺权限仍退出 0，宿主应读取 `allGranted` 并重新查询授权变化。此状态延续系统 API/TCC 合并诊断语义，并非操作成功证明；Linux/Windows 明确拒绝该权限查询模式。普通 `doctor` 保留文本输出与权限引导。
+
+Locked Use’s non-UI authorization mechanism is registered with `,privileged` and restricted to Apple's root authorizationhosthelper peers. A separate load-check right must return a fixed extractable context marker before the installer attaches the remote branch to system.login.screensaver; signature checks and a denied AuthorizationCopyRights result alone do not prove host compatibility. The original native fallback is preserved.
+
+The load-check grants only its isolated right, with `shared=false` and a fresh AuthorizationRef that is destroyed afterwards. authd does not export context on a denied result. It reads/writes no credentials and never evaluates system.login.screensaver; successful marker export is required before installation changes that policy.

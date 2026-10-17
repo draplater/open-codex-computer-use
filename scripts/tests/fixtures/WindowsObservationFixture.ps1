@@ -17,6 +17,7 @@ public static class ObservationDwm {
 "@
 $window = New-Object System.Windows.Window
 $window.Title = "OCU Windows Observation Fixture"
+$window.ShowInTaskbar = $true
 $window.Left = 80
 $window.Top = 80
 $window.Width = 600
@@ -85,4 +86,6 @@ $timer.Add_Tick({
 })
 $timer.Start()
 $window.Add_Closed({ $timer.Stop() })
-[void]$window.ShowDialog()
+$application = New-Object System.Windows.Application
+$application.ShutdownMode = "OnMainWindowClose"
+[void]$application.Run($window)

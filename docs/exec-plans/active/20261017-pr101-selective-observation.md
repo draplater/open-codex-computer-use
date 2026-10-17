@@ -32,3 +32,18 @@ Check full/AX-only/screenshot-only results and skipped production collection hel
 - Real GTK 3/AT-SPI on Debian 12 ARM64 in private Xvfb/D-Bus passed production-helper collection checks, valid PNG output, Unicode selection, stale name/PID indexes refused, coordinate click and AX recovery. Worker JS/native/GTK and existing default read-back, focus and hidden-details smokes passed.
 - Temporary container and build artifacts removed. No desktop VM, Wayland/other-toolkit performance claim or version bump.
 - User's unchanged-image concern is documented separately: this PR selects collection on Linux; exact image comparison, cross-platform support, first/reset/forced output and session/window scoping remain follow-up design items in the debt tracker. No automatic deduplication is claimed.
+
+## Cross-platform extension (requested follow-up)
+
+The user explicitly requested macOS and Windows parity across CLI/MCP/JS. The earlier Linux-only scope is superseded for selective collection; automatic image deduplication remains separate.
+
+- [ ] Add shared macOS observation options, real/fixture collection gates, schema/dispatcher, cache/query-index invalidation and app-agent forwarding.
+- [ ] Add Windows Go/PowerShell selection, request/schema/cache behavior and executable bridge tests.
+- [ ] Expose matching snapshot --include-ax/--include-screenshot true|false flags on all platforms; preserve legacy defaults.
+- [ ] Make explicit AX-only observations reject screenshot-coordinate input on all platforms, while preserving element actions.
+- [ ] Validate macOS with a normally signed release and isolated real window; Linux with real GTK; Windows with Go/PowerShell tests and builds, stating any unavailable Windows desktop validation.
+- [ ] Update current docs/history/PR around the final cross-platform behavior, sync remotes, push.
+
+### Hosted Windows validation
+
+Local native/GTK/macOS checks passed. A focused read-only-permissions Windows Actions job is being added to run a disposable WinForms fixture against the actual Windows binary. It covers explicit channels, stale indexes, real UIA set_value, coordinate refusal and normal/1x1/minimized/cloaked image handling. This provides the Windows desktop verification required by RELIABILITY without starting a local VM. Until the hosted job passes, Windows UIA validation is pending and is not claimed.

@@ -41,7 +41,7 @@ The runtime exposes an asynchronous app-bound API:
 - \`await app.getAXState({ emit?, textLimit?, maxTreeNodes?, maxTreeDepth?, windowPlacement? })\`
 - \`await app.getScreenshot({ emit? })\`
 - \`await app.getAXStateAndScreenshot(options?)\`
-- Linux-only opt-in observation: \`app.getScreenshot({ includeAX: false })\` skips AX/focus/selection and invalidates prior element indexes; refresh AX before element actions. \`app.getAXState({ includeScreenshot: false })\` skips capture. Omitted options retain full native observation.
+- Optional observation on macOS, Windows and Linux: \`app.getScreenshot({ includeAX: false })\` skips AX/focus/selection and invalidates prior element indexes; refresh AX before element actions. \`app.getAXState({ includeScreenshot: false })\` skips capture; screenshot-coordinate actions require a fresh screenshot. Omitted options retain full native observation.
 - \`await app.click(elementIndexOrPoint, { mouseButton?, clickCount?, clickMethod? })\`
 - \`await app.scroll(elementIndex, direction, pages?)\`
 - \`await app.drag([fromX, fromY], [toX, toY])\`

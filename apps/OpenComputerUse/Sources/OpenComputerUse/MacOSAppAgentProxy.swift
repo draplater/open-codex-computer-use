@@ -523,9 +523,9 @@ private final class AppAgentConnection: @unchecked Sendable {
                 let service = ComputerUseService()
                 return CLIProxyResponse(stdout: (service.listApps().primaryText ?? "") + "\n", stderr: "", exitCode: EXIT_SUCCESS)
 
-            case let .snapshot(app, textLimit, treeLimits):
+            case let .snapshot(app, textLimit, treeLimits, observation):
                 let service = ComputerUseService()
-                let text = try service.getAppState(app: app, textLimit: textLimit, treeLimits: treeLimits).primaryText ?? ""
+                let text = try service.getAppState(app: app, textLimit: textLimit, treeLimits: treeLimits, observation: observation).textContent
                 return CLIProxyResponse(stdout: text + "\n", stderr: "", exitCode: EXIT_SUCCESS)
 
             case let .call(invocation):

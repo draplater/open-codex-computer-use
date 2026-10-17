@@ -541,6 +541,7 @@ func shouldPreferContainingWebRowAXClickCandidate(
 
 public final class ComputerUseService {
     private var snapshotsByApp: [String: AppSnapshot] = [:]
+    private var invalidatedSnapshotAliases: Set<String> = []
     // Read per call: the app agent applies the caller's OPEN_COMPUTER_USE_* variables
     // for the duration of each request.
     private var actionReadBack: Bool { actionReadBackEnabled(environment: ProcessInfo.processInfo.environment) }
@@ -593,14 +594,16 @@ public final class ComputerUseService {
         app query: String,
         textLimit: SnapshotTextLimit = .defaults,
         treeLimits: AccessibilityTreeLimits = .defaults,
-        windowPlacement: WindowPlacement = .keep
+        windowPlacement: WindowPlacement = .keep,
+        observation: SnapshotObservationOptions = .defaults
     ) throws -> ToolCallResult {
+        try observation.validate()
         guard windowPlacement != .keep else {
-            return snapshotResult(for: try refreshSnapshot(for: query, textLimit: textLimit, treeLimits: treeLimits), style: .fullState)
+            return snapshotResult(for: try refreshSnapshot(for: query, textLimit: textLimit, treeLimits: treeLimits, observation: observation), style: .fullState)
         }
 
         // Explicit placements never activate or raise; they only move the frame.
-        let snapshot = try refreshSnapshot(for: query, textLimit: textLimit, treeLimits: treeLimits, recoveryPolicy: .readOnly)
+        let snapshot = try refreshSnapshot(for: query, textLimit: textLimit, treeLimits: treeLimits, recoveryPolicy: .readOnly, observation: observation)
         guard snapshot.mode != .fixture else {
             throw ComputerUseError.message("window_placement '\(windowPlacement.rawValue)' is not supported for fixture apps")
         }
@@ -616,7 +619,7 @@ public final class ComputerUseService {
             break
         }
 
-        return snapshotResult(for: try refreshSnapshot(for: query, textLimit: textLimit, treeLimits: treeLimits, recoveryPolicy: .readOnly), style: .fullState)
+        return snapshotResult(for: try refreshSnapshot(for: query, textLimit: textLimit, treeLimits: treeLimits, recoveryPolicy: .readOnly, observation: observation), style: .fullState)
     }
 
     public func click(
@@ -641,6 +644,9 @@ public final class ComputerUseService {
 
         let snapshot = try snapshotForAction(app: query, elementIndex: elementIndex)
         let button = MouseButtonKind(rawValue: mouseButton.lowercased()) ?? .left
+        if elementIndex == nil, !snapshot.observation.includeScreenshot {
+            throw ComputerUseError.stateUnavailable(SnapshotObservationOptions.screenshotOmittedNote + "; request a screenshot before screenshot-coordinate actions")
+        }
         if snapshot.mode == .fixture {
             guard clickMethod == .auto else {
                 throw ComputerUseError.message(
@@ -878,6 +884,9 @@ public final class ComputerUseService {
 
     public func drag(app query: String, fromX: Double, fromY: Double, toX: Double, toY: Double) throws -> ToolCallResult {
         let snapshot = try currentSnapshot(for: query)
+        guard snapshot.observation.includeScreenshot else {
+            throw ComputerUseError.stateUnavailable(SnapshotObservationOptions.screenshotOmittedNote + "; request a screenshot before screenshot-coordinate actions")
+        }
         if snapshot.mode == .fixture {
             try FixtureBridge.post(FixtureCommand(kind: "drag", identifier: "fixture-drag-pad", x: fromX, y: fromY, toX: toX, toY: toY))
             Thread.sleep(forTimeInterval: 0.15)
@@ -1185,7 +1194,7 @@ public final class ComputerUseService {
         return dict
     }
 
-    private func currentSnapshot(for query: String) throws -> AppSnapshot {
+    func currentSnapshot(for query: String) throws -> AppSnapshot {
         if let snapshot = snapshotsByApp[query.lowercased()] {
             if snapshot.mode != .fixture {
                 do {
@@ -1198,6 +1207,9 @@ public final class ComputerUseService {
             return snapshot
         }
 
+        if invalidatedSnapshotAliases.contains(query.lowercased()) {
+            throw ComputerUseError.stateUnavailable(SnapshotObservationOptions.accessibilityOmittedNote)
+        }
         return try refreshSnapshot(for: query)
     }
 
@@ -1206,27 +1218,47 @@ public final class ComputerUseService {
         for query: String,
         textLimit: SnapshotTextLimit = .defaults,
         treeLimits: AccessibilityTreeLimits = .defaults,
-        recoveryPolicy: SnapshotRecoveryPolicy = .allowActivation
+        recoveryPolicy: SnapshotRecoveryPolicy = .allowActivation,
+        observation: SnapshotObservationOptions = .defaults
     ) throws -> AppSnapshot {
         let app = try AppDiscovery.resolve(query)
         let snapshot = try SnapshotBuilder.build(
             for: app,
             textLimit: textLimit,
             treeLimits: treeLimits,
-            recoveryPolicy: recoveryPolicy
+            recoveryPolicy: recoveryPolicy,
+            observation: observation
         )
+
+        rememberSnapshot(snapshot, for: query)
+        return snapshot
+    }
+
+    func rememberSnapshot(_ snapshot: AppSnapshot, for query: String) {
+        let app = snapshot.app
+        if !snapshot.observation.includeAX {
+            var pids: Set<Int32> = [app.pid]
+            if let previous = snapshotsByApp[query.lowercased()] { pids.insert(previous.app.pid) }
+            let aliases = snapshotsByApp.compactMap { pids.contains($0.value.app.pid) ? $0.key : nil }
+            for alias in aliases {
+                snapshotsByApp.removeValue(forKey: alias)
+                invalidatedSnapshotAliases.insert(alias)
+            }
+            targetedElements.removeAll(forPIDs: pids)
+        }
 
         let keys = Set([
             query.lowercased(),
+            String(app.pid),
             app.name.lowercased(),
             (app.bundleIdentifier ?? "").lowercased(),
         ].filter { !$0.isEmpty })
 
         for key in keys {
             snapshotsByApp[key] = snapshot
+            invalidatedSnapshotAliases.remove(key)
         }
 
-        return snapshot
     }
 
     private func lookupElement(snapshot: AppSnapshot, index: String) throws -> ElementRecord {

@@ -88,6 +88,7 @@ type elementRecord struct {
 }
 
 type appSnapshot struct {
+	ScreenshotOmitted   bool            `json:"-"`
 	App                 appDescriptor   `json:"app"`
 	WindowTitle         string          `json:"windowTitle,omitempty"`
 	WindowBounds        *frame          `json:"windowBounds,omitempty"`
@@ -116,6 +117,9 @@ func (s *appSnapshot) renderedText() string {
 		fmt.Sprintf("Window: %q, App: %s.", title, s.App.Name),
 	}
 	lines = append(lines, s.TreeLines...)
+	if s.ScreenshotOmitted {
+		lines = append(lines, "Screenshot omitted by include_screenshot=false")
+	}
 	if strings.TrimSpace(s.SelectedText) != "" {
 		lines = append(lines, "", fmt.Sprintf("Selected text: [%s]", s.SelectedText))
 	} else if strings.TrimSpace(s.FocusedSummary) != "" {
@@ -346,6 +350,9 @@ func (s *service) click(app, elementIndex string, x, y *float64, clickCount int,
 	if snapshot == nil {
 		return textResult("No app state is available for "+app+". Run get_app_state before action tools.", true)
 	}
+	if elementIndex == "" && snapshot.ScreenshotOmitted {
+		return textResult("Screenshot omitted by include_screenshot=false; request a screenshot before screenshot-coordinate actions.", true)
+	}
 	request := linuxRequest{
 		Tool:         "click",
 		App:          app,
@@ -431,6 +438,9 @@ func (s *service) drag(app string, fromX, fromY, toX, toY *float64) toolCallResu
 	snapshot := s.currentSnapshot(app)
 	if snapshot == nil {
 		return textResult("No app state is available for "+app+". Run get_app_state before action tools.", true)
+	}
+	if snapshot.ScreenshotOmitted {
+		return textResult("Screenshot omitted by include_screenshot=false; request a screenshot before screenshot-coordinate actions.", true)
 	}
 	return s.actionResult(app, linuxRequest{Tool: "drag", App: app, FromX: fromX, FromY: fromY, ToX: toX, ToY: toY, WindowBounds: snapshot.WindowBounds})
 }
@@ -530,6 +540,10 @@ func (s *service) refreshSnapshot(app string, request linuxRequest) (*appSnapsho
 	if response.Snapshot == nil {
 		return nil, textResult("Linux runtime did not return an app snapshot.", true)
 	}
+	if request.IncludeScreenshot != nil && !*request.IncludeScreenshot {
+		response.Snapshot.ScreenshotPNGBase64 = ""
+		response.Snapshot.ScreenshotOmitted = true
+	}
 	if request.IncludeAX != nil && !*request.IncludeAX {
 		// A screenshot cannot validate AX indexes, even if the window title matches.
 		// Invalidate every alias of the prior observation, including PID queries.
@@ -541,6 +555,9 @@ func (s *service) refreshSnapshot(app string, request linuxRequest) (*appSnapsho
 			}
 		}
 		response.Snapshot.Elements = nil
+		response.Snapshot.TreeLines = nil
+		response.Snapshot.FocusedSummary = ""
+		response.Snapshot.SelectedText = ""
 	}
 	s.rememberSnapshot(app, response.Snapshot)
 	return response.Snapshot, toolCallResult{}
@@ -1291,8 +1308,8 @@ func toolDefinitions() []toolDefinition {
 				"max_tree_depth":   positiveIntegerProperty("Maximum accessibility tree depth to render. Defaults to 64."),
 				"window_placement": enumStringProperty("keep (default) leaves the window where it is. agent_display and restore are macOS-only and not supported on Linux.", windowPlacementValues),
 
-				"include_ax":         map[string]any{"type": "boolean", "default": true, "description": "Include accessibility tree, focus and selection. False skips AX collection and invalidates prior element indexes; coordinate actions remain available. Linux-only."},
-				"include_screenshot": map[string]any{"type": "boolean", "default": true, "description": "Capture and return a screenshot. False skips capture and PNG encoding. Linux-only."},
+				"include_ax":         map[string]any{"type": "boolean", "default": true, "description": "Include accessibility tree, focus and selection. False skips AX collection and invalidates prior element indexes; coordinate actions remain available."},
+				"include_screenshot": map[string]any{"type": "boolean", "default": true, "description": "Capture and return a screenshot. False skips capture and PNG encoding."},
 			}, []string{"app"}),
 		},
 		{
@@ -1447,13 +1464,16 @@ func runCLI(args []string, stdout io.Writer) error {
 		fmt.Fprintln(stdout, result.Content[0].Text)
 		return nil
 	case "snapshot":
-		app, textLimit, maxTreeNodes, maxTreeDepth, err := parseSnapshotArgs(args[1:])
+		snapshotArgs, observation, err := parseSnapshotObservationArgs(args[1:])
 		if err != nil {
 			return err
 		}
-		toolArgs := map[string]any{
-			"app": app,
+		app, textLimit, maxTreeNodes, maxTreeDepth, err := parseSnapshotArgs(snapshotArgs)
+		if err != nil {
+			return err
 		}
+		toolArgs := observation
+		toolArgs["app"] = app
 		if textLimit != nil {
 			toolArgs["text_limit"] = textLimit.runtimeValue()
 		}
@@ -1486,6 +1506,37 @@ func runCLI(args []string, stdout io.Writer) error {
 	default:
 		return fmt.Errorf("unknown command: %s\n\n%s", args[0], helpText(""))
 	}
+}
+
+func parseSnapshotObservationArgs(args []string) ([]string, map[string]any, error) {
+	remaining := []string{}
+	options := map[string]any{}
+	for index := 0; index < len(args); index++ {
+		option := args[index]
+		if option != "--include-ax" && option != "--include-screenshot" {
+			remaining = append(remaining, option)
+			continue
+		}
+		index++
+		if index >= len(args) {
+			return nil, nil, fmt.Errorf("%s requires true or false", option)
+		}
+		var value bool
+		switch strings.ToLower(args[index]) {
+		case "true":
+			value = true
+		case "false":
+			value = false
+		default:
+			return nil, nil, fmt.Errorf("%s requires true or false", option)
+		}
+		key := strings.ReplaceAll(strings.TrimPrefix(option, "--"), "-", "_")
+		options[key] = value
+	}
+	if options["include_ax"] == false && options["include_screenshot"] == false {
+		return nil, nil, errors.New("At least one of include_ax or include_screenshot must be true")
+	}
+	return remaining, options, nil
 }
 
 func parseSnapshotArgs(args []string) (string, *textLimit, *int, *int, error) {
@@ -1791,7 +1842,7 @@ func helpText(command string) string {
 	case "call":
 		return "Usage:\n  open-computer-use call <tool> [--args '<json-object>']\n  open-computer-use call --calls '<json-array>'\n\nThe JSON array form keeps all calls in one process so element_index state can be reused.\n"
 	case "snapshot":
-		return "Usage:\n  open-computer-use snapshot [--text-limit <positive-int|max>] [--max-tree-nodes <positive-int>] [--max-tree-depth <positive-int>] <app>\n\nPrint the current Linux AT-SPI snapshot for the target app.\n"
+		return "Usage:\n  open-computer-use snapshot [--include-ax true|false] [--include-screenshot true|false] [--text-limit <positive-int|max>] [--max-tree-nodes <positive-int>] [--max-tree-depth <positive-int>] <app>\n\nPrint the current Linux AT-SPI snapshot for the target app.\n"
 	default:
 		return `Open Computer Use for Linux
 

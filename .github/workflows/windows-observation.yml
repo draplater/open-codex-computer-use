@@ -1,0 +1,44 @@
+name: Windows observation
+
+on:
+  pull_request:
+    paths:
+      - 'apps/OpenComputerUseWindows/**'
+      - 'scripts/tests/windows-observation*'
+      - 'scripts/tests/fixtures/WindowsObservationFixture.ps1'
+      - '.github/workflows/windows-observation.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-observation-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows-observation:
+    runs-on: windows-2025
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
+        with:
+          go-version: '1.26.1'
+          cache: false
+      - name: Windows Go tests and build
+        working-directory: apps/OpenComputerUseWindows
+        run: |
+          go test ./...
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go build -o "$env:RUNNER_TEMP/ocu-observation.exe" .
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: PowerShell collection branches
+        run: |
+          powershell.exe -NoProfile -NonInteractive -File ./scripts/tests/windows-observation.test.ps1 -RuntimePath apps/OpenComputerUseWindows/runtime.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Real WinForms and native MCP
+        run: ./scripts/tests/windows-observation-smoke.ps1 -NativePath "$env:RUNNER_TEMP/ocu-observation.exe"

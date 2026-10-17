@@ -1,0 +1,106 @@
+param([Parameter(Mandatory = $true)][string]$NativePath)
+$ErrorActionPreference = "Stop"
+if ($env:OS -ne "Windows_NT") { throw "Windows desktop required" }
+$NativePath = (Resolve-Path -LiteralPath $NativePath).Path
+$directory = Join-Path ([System.IO.Path]::GetTempPath()) ("ocu-observation-" + [Guid]::NewGuid())
+[void](New-Item -ItemType Directory -Path $directory)
+$stateFile = Join-Path $directory "state.json"
+$fixture = $null
+$native = $null
+$requestId = 0
+$sequence = 0
+
+function Assert($condition, $message) { if (-not $condition) { throw $message } }
+function Wait-For($test, $description) {
+    $deadline = [DateTime]::UtcNow.AddSeconds(15)
+    do {
+        try { if (& $test) { return } } catch { }
+        Start-Sleep -Milliseconds 50
+    } while ([DateTime]::UtcNow -lt $deadline)
+    throw "Timeout: $description"
+}
+function Read-State { [System.IO.File]::ReadAllText($stateFile) | ConvertFrom-Json }
+function Send-Request($method, $parameters) {
+    $script:requestId += 1
+    $message = @{ jsonrpc = "2.0"; id = $script:requestId; method = $method; params = $parameters }
+    $native.StandardInput.WriteLine(($message | ConvertTo-Json -Depth 20 -Compress))
+    $native.StandardInput.Flush()
+    $read = $native.StandardOutput.ReadLineAsync()
+    Assert ($read.Wait(40000)) "MCP timed out"
+    Assert (-not [string]::IsNullOrWhiteSpace($read.Result)) "MCP exited"
+    $response = $read.Result | ConvertFrom-Json
+    Assert ($response.id -eq $script:requestId -and $null -eq $response.error) "Unexpected RPC response"
+    return $response.result
+}
+function Call-Tool($tool, $arguments) {
+    if (-not $arguments.ContainsKey("app")) { $arguments.app = [string]$fixture.Id }
+    Send-Request "tools/call" @{ name = $tool; arguments = $arguments }
+}
+function Text($result) { ($result.content | Where-Object type -eq "text" | ForEach-Object text) -join "`n" }
+function Images($result) { @($result.content | Where-Object type -eq "image") }
+function Input-Index($result) {
+    $match = [regex]::Match((Text $result), '(?m)^\s*(\d+)\s+[^\r\n]*Observation input(?:\s|$)')
+    Assert $match.Success (Text $result)
+    $match.Groups[1].Value
+}
+function Change-Window($kind) {
+    $script:sequence += 1
+    $message = @{ sequence = $script:sequence; kind = $kind } | ConvertTo-Json -Compress
+    [System.IO.File]::WriteAllText(($stateFile + ".command"), $message, [System.Text.Encoding]::UTF8)
+    Wait-For { (Read-State).sequence -eq $script:sequence } "fixture window command"
+    Start-Sleep -Milliseconds 200
+}
+try {
+    $fixtureSource = Join-Path $PSScriptRoot "fixtures/WindowsObservationFixture.ps1"
+    $fixture = Start-Process powershell.exe -ArgumentList @("-NoProfile", "-STA", "-File", "`"$fixtureSource`"", "-StatePath", "`"$stateFile`"") -PassThru
+    Wait-For { Test-Path -LiteralPath $stateFile } "WinForms startup"
+    $start = New-Object System.Diagnostics.ProcessStartInfo
+    $start.FileName = $NativePath
+    $start.Arguments = "mcp"
+    $start.UseShellExecute = $false
+    $start.RedirectStandardInput = $true
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    $start.StandardOutputEncoding = [System.Text.Encoding]::UTF8
+    $native = New-Object System.Diagnostics.Process
+    $native.StartInfo = $start
+    [void]$native.Start()
+    $null = Send-Request "initialize" @{ protocolVersion = "2025-03-26"; capabilities = @{}; clientInfo = @{ name = "windows-observation-smoke"; version = "1" } }
+    $full = Call-Tool "get_app_state" @{}
+    Assert (-not $full.isError -and (Images $full).Count -eq 1) (Text $full)
+    $oldIndex = Input-Index $full
+    $image = Call-Tool "get_app_state" @{ include_ax = $false }
+    Assert (-not $image.isError -and (Images $image).Count -eq 1) (Text $image)
+    Assert ((Text $image) -match "indexes invalidated" -and (Text $image) -notmatch "Observation input") "AX not omitted"
+    $stale = Call-Tool "set_value" @{ element_index = $oldIndex; value = "must-not-write" }
+    Assert $stale.isError "Stale index accepted"
+    $ax = Call-Tool "get_app_state" @{ include_screenshot = $false }
+    Assert (-not $ax.isError -and (Images $ax).Count -eq 0) (Text $ax)
+    $coordinates = Call-Tool "click" @{ x = 10; y = 10 }
+    Assert $coordinates.isError "AX-only coordinate action accepted"
+    $value = "live-" + [char]0x4E2D + [char]0x6587
+    $write = Call-Tool "set_value" @{ element_index = (Input-Index $ax); value = $value }
+    Assert (-not $write.isError) (Text $write)
+    Wait-For { (Read-State).text -eq $value } "real UIA value update"
+    foreach ($kind in @("tiny", "minimize", "cloak")) {
+        Change-Window $kind
+        if ($kind -eq "tiny") { Assert ((Read-State).width -eq 1 -and (Read-State).height -eq 1) "Window did not become 1x1" }
+        if ($kind -eq "minimize") { Assert (Read-State).minimized "Window did not minimize" }
+        if ($kind -eq "cloak") { Assert ((Read-State).cloakHResult -eq 0 -and (Read-State).cloaked -ne 0) "Window did not cloak" }
+        $unusable = Call-Tool "get_app_state" @{}
+        Assert ((Images $unusable).Count -eq 0) "$kind window returned an image"
+        Change-Window "restore"
+        $restored = Call-Tool "get_app_state" @{}
+        Assert (-not $restored.isError -and (Images $restored).Count -eq 1) (Text $restored)
+    }
+    $cli = & $NativePath snapshot --include-screenshot false ([string]$fixture.Id)
+    Assert ($LASTEXITCODE -eq 0 -and ($cli -join "`n") -match "include_screenshot=false") "CLI flag not forwarded"
+    Write-Output "Windows real WinForms/native MCP/CLI: channels, stale indexes, AX recovery, coordinate refusal, Unicode UIA write, 1x1/minimized/cloaked screenshot filtering passed."
+} finally {
+    if ($null -ne $native -and -not $native.HasExited) {
+        $native.StandardInput.Close()
+        if (-not $native.WaitForExit(3000)) { $native.Kill(); $native.WaitForExit() }
+    }
+    if ($null -ne $fixture -and -not $fixture.HasExited) { $fixture.Kill(); $fixture.WaitForExit() }
+    Remove-Item -LiteralPath $directory -Recurse -Force
+}

@@ -67,7 +67,11 @@ public final class ComputerUseToolDispatcher {
                     maxNodeCount: try optionalPositiveInt("max_tree_nodes", in: arguments),
                     maxDepth: try optionalPositiveInt("max_tree_depth", in: arguments)
                 ),
-                windowPlacement: try parseWindowPlacement(optionalString("window_placement", in: arguments))
+                windowPlacement: try parseWindowPlacement(optionalString("window_placement", in: arguments)),
+                observation: SnapshotObservationOptions(
+                    includeAX: try strictObservationBool("include_ax", in: arguments),
+                    includeScreenshot: try strictObservationBool("include_screenshot", in: arguments)
+                )
             )
         case "click":
             return try service.click(
@@ -152,6 +156,14 @@ public final class ComputerUseToolDispatcher {
         }
 
         return value
+    }
+
+    private func strictObservationBool(_ key: String, in arguments: [String: Any]) throws -> Bool {
+        guard let value = arguments[key] else { return true }
+        guard let number = value as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() else {
+            throw ComputerUseError.invalidArguments("\(key) must be a boolean")
+        }
+        return number.boolValue
     }
 
     private func optionalBool(_ key: String, in arguments: [String: Any]) -> Bool? {

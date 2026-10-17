@@ -50,3 +50,14 @@ Changing `getScreenshot()` defaults would also change its implicit index refresh
 需求评估：#101 提供 Linux 显式通道选择，不做截图去重，也未实现其他平台的通道开关。现有 macOS / Linux JS 动作已禁用自动回读，getAXState 不输出图片，但仍可能浪费 native 采集。未变化图片省略通常仍需截图后比较，主要节省传输和模型输入；后续的跨平台支持、会话 / 应用 / 窗口隔离、首帧 / 重置 / 强制返回和精确图像比较已记录到技术债追踪，不以 AX 未变作为画面未变的证据。
 
 验证结束后已删除临时容器和独立构建制品，未影响其他容器服务。
+
+## 2026-10-17：按用户要求统一三个平台
+
+用户明确要求扩展 macOS / Windows，而不只实现 Linux。本阶段取代前文的 Linux-only 范围；自动图片去重仍单独跟踪。
+
+- macOS 新增观察选项、严格布尔校验、schema / dispatcher / app-agent CLI 转发，截图关闭时跳过捕获和编码，AX 关闭时跳过树、选区、菜单及懒加载重试。fixture 同步行为。纯截图清理旧进程快照别名和 query 索引，旧别名不能触发隐式刷新继续使用旧编号。
+- Windows Go / PowerShell 支持同样的参数、默认和空观察拒绝；按通道跳过生产采集函数，防御性清理结果中的禁用通道及旧缓存。新增纯传输测试接口，不改变生产 Windows / PowerShell 宿主限制。
+- 三个平台的 snapshot CLI 新增 --include-ax / --include-screenshot true|false。只取 AX 后拒绝截图坐标输入，保留元素操作。macOS CLI 改为打印所有文本说明但不输出图片字节，修复实测发现的省略原因丢失。
+- macOS 正常签名 release + 自有 AppKit 窗口实测通过：CLI / MCP / Worker JS、PNG、timing 分支证据、普通 / query 索引失效、坐标拒绝与 AX 恢复；窗口不能成为 key/main，未修改系统准入或权限。
+- 本地检查：Swift 382 项（8 跳过、0 失败），观察专项 8 项；Linux Go 31 项、Python 35 项、Node 44 项；Windows Go 29 项与生产 PowerShell 函数分支测试通过；Linux / Windows 双架构构建及 targeted vet 通过。真实 GTK 观察、焦点、隐藏详情及 macOS 原生工具 / cursor smoke 通过。
+- 增加专门的 Windows Actions 检查与临时 WinForms 夹具，尝试补齐 RELIABILITY 要求的真实 UIA / 截图验证。该 hosted 检查结果仍待记录，不把 PowerShell 依赖替身测试冒充桌面通过。工作流使用仓库既有固定 SHA actions 和 contents:read，无发布步骤。

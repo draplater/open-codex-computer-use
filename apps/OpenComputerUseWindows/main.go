@@ -93,6 +93,7 @@ type elementRecord struct {
 }
 
 type appSnapshot struct {
+	ScreenshotOmitted   bool            `json:"-"`
 	App                 appDescriptor   `json:"app"`
 	WindowTitle         string          `json:"windowTitle,omitempty"`
 	WindowBounds        *frame          `json:"windowBounds,omitempty"`
@@ -121,7 +122,9 @@ func (s *appSnapshot) renderedText() string {
 		fmt.Sprintf("Window: %q, App: %s.", title, s.App.Name),
 	}
 	lines = append(lines, s.TreeLines...)
-	if !s.hasUsableScreenshot() {
+	if s.ScreenshotOmitted {
+		lines = append(lines, "", "Screenshot omitted by include_screenshot=false")
+	} else if !s.hasUsableScreenshot() {
 		lines = append(lines, "", "Screenshot unavailable. Restore a visible, non-minimized, on-screen window before using screenshot-coordinate actions; element_index actions may still work.")
 	}
 	if strings.TrimSpace(s.SelectedText) != "" {
@@ -198,28 +201,30 @@ func validateScreenshotPNGBase64(encoded string) string {
 }
 
 type psRequest struct {
-	Tool         string         `json:"tool"`
-	App          string         `json:"app,omitempty"`
-	Element      *elementRecord `json:"element,omitempty"`
-	X            *float64       `json:"x,omitempty"`
-	Y            *float64       `json:"y,omitempty"`
-	FromX        *float64       `json:"from_x,omitempty"`
-	FromY        *float64       `json:"from_y,omitempty"`
-	ToX          *float64       `json:"to_x,omitempty"`
-	ToY          *float64       `json:"to_y,omitempty"`
-	ClickCount   int            `json:"click_count,omitempty"`
-	MouseButton  string         `json:"mouse_button,omitempty"`
-	ClickMethod  string         `json:"click_method,omitempty"`
-	Action       string         `json:"action,omitempty"`
-	Direction    string         `json:"direction,omitempty"`
-	Pages        float64        `json:"pages,omitempty"`
-	Text         string         `json:"text,omitempty"`
-	Key          string         `json:"key,omitempty"`
-	Value        string         `json:"value,omitempty"`
-	WindowBounds *frame         `json:"windowBounds,omitempty"`
-	TextLimit    any            `json:"text_limit,omitempty"`
-	MaxTreeNodes int            `json:"max_tree_nodes,omitempty"`
-	MaxTreeDepth int            `json:"max_tree_depth,omitempty"`
+	IncludeAX         *bool          `json:"include_ax,omitempty"`
+	IncludeScreenshot *bool          `json:"include_screenshot,omitempty"`
+	Tool              string         `json:"tool"`
+	App               string         `json:"app,omitempty"`
+	Element           *elementRecord `json:"element,omitempty"`
+	X                 *float64       `json:"x,omitempty"`
+	Y                 *float64       `json:"y,omitempty"`
+	FromX             *float64       `json:"from_x,omitempty"`
+	FromY             *float64       `json:"from_y,omitempty"`
+	ToX               *float64       `json:"to_x,omitempty"`
+	ToY               *float64       `json:"to_y,omitempty"`
+	ClickCount        int            `json:"click_count,omitempty"`
+	MouseButton       string         `json:"mouse_button,omitempty"`
+	ClickMethod       string         `json:"click_method,omitempty"`
+	Action            string         `json:"action,omitempty"`
+	Direction         string         `json:"direction,omitempty"`
+	Pages             float64        `json:"pages,omitempty"`
+	Text              string         `json:"text,omitempty"`
+	Key               string         `json:"key,omitempty"`
+	Value             string         `json:"value,omitempty"`
+	WindowBounds      *frame         `json:"windowBounds,omitempty"`
+	TextLimit         any            `json:"text_limit,omitempty"`
+	MaxTreeNodes      int            `json:"max_tree_nodes,omitempty"`
+	MaxTreeDepth      int            `json:"max_tree_depth,omitempty"`
 }
 
 type textLimit struct {
@@ -243,10 +248,11 @@ type psResponse struct {
 
 type service struct {
 	snapshots map[string]*appSnapshot
+	runBridge func(psRequest) (*psResponse, error)
 }
 
 func newService() *service {
-	return &service{snapshots: map[string]*appSnapshot{}}
+	return &service{snapshots: map[string]*appSnapshot{}, runBridge: runPowerShell}
 }
 
 func (s *service) callTool(name string, args map[string]any) toolCallResult {
@@ -273,7 +279,18 @@ func (s *service) callTool(name string, args map[string]any) toolCallResult {
 		if windowPlacement != "keep" {
 			return textResult("window_placement '"+windowPlacement+"' is not supported on Windows", true)
 		}
-		return s.getAppState(requiredString(args, "app"), textLimit, maxTreeNodes, maxTreeDepth)
+		includeAX, err := optionalBool(args, "include_ax")
+		if err != nil {
+			return textResult(err.Error(), true)
+		}
+		includeScreenshot, err := optionalBool(args, "include_screenshot")
+		if err != nil {
+			return textResult(err.Error(), true)
+		}
+		if includeAX != nil && !*includeAX && includeScreenshot != nil && !*includeScreenshot {
+			return textResult("At least one of include_ax or include_screenshot must be true", true)
+		}
+		return s.getAppState(requiredString(args, "app"), textLimit, maxTreeNodes, maxTreeDepth, includeAX, includeScreenshot)
 	case "click":
 		clickMethod, err := parseClickMethod(optionalString(args, "click_method"))
 		if err != nil {
@@ -329,7 +346,7 @@ func (s *service) callTool(name string, args map[string]any) toolCallResult {
 }
 
 func (s *service) listApps() toolCallResult {
-	response, err := runPowerShell(psRequest{Tool: "list_apps"})
+	response, err := s.runBridge(psRequest{Tool: "list_apps"})
 	if err != nil {
 		return textResult(err.Error(), true)
 	}
@@ -342,11 +359,11 @@ func (s *service) listApps() toolCallResult {
 	return textResult(response.Text, false)
 }
 
-func (s *service) getAppState(app string, textLimit *textLimit, maxTreeNodes, maxTreeDepth *int) toolCallResult {
+func (s *service) getAppState(app string, textLimit *textLimit, maxTreeNodes, maxTreeDepth *int, includeAX, includeScreenshot *bool) toolCallResult {
 	if app == "" {
 		return textResult("Missing required argument: app", true)
 	}
-	request := psRequest{Tool: "get_app_state", App: app}
+	request := psRequest{Tool: "get_app_state", App: app, IncludeAX: includeAX, IncludeScreenshot: includeScreenshot}
 	if textLimit != nil {
 		request.TextLimit = textLimit.runtimeValue()
 	}
@@ -360,7 +377,11 @@ func (s *service) getAppState(app string, textLimit *textLimit, maxTreeNodes, ma
 	if result.IsError {
 		return result
 	}
-	return snapshot.result()
+	result = snapshot.result()
+	if includeAX != nil && !*includeAX {
+		result.Content[0].Text += "\nAccessibility omitted; previous element indexes invalidated. Read AX before element-targeted actions."
+	}
+	return result
 }
 
 func (s *service) click(app, elementIndex string, x, y *float64, clickCount int, mouseButton, clickMethod string) toolCallResult {
@@ -479,7 +500,7 @@ func (s *service) drag(app string, fromX, fromY, toX, toY *float64) toolCallResu
 }
 
 func screenshotCoordinatesUnavailableResult(app string) toolCallResult {
-	return textResult("No usable screenshot is available for "+app+". Restore a visible, non-minimized, on-screen window and run get_app_state again before using screenshot coordinates.", true)
+	return textResult("No usable screenshot is available for "+app+". Run get_app_state with include_screenshot=true on a visible, non-minimized, on-screen window before using screenshot coordinates.", true)
 }
 
 func (s *service) typeText(app, text, keyMethod string) toolCallResult {
@@ -545,7 +566,7 @@ func (s *service) currentSnapshot(app string) *appSnapshot {
 }
 
 func (s *service) refreshSnapshot(app string, request psRequest) (*appSnapshot, toolCallResult) {
-	response, err := runPowerShell(request)
+	response, err := s.runBridge(request)
 	if err != nil {
 		return nil, textResult(err.Error(), true)
 	}
@@ -554,6 +575,25 @@ func (s *service) refreshSnapshot(app string, request psRequest) (*appSnapshot, 
 	}
 	if response.Snapshot == nil {
 		return nil, textResult("Windows runtime did not return an app snapshot.", true)
+	}
+	if request.IncludeScreenshot != nil && !*request.IncludeScreenshot {
+		response.Snapshot.ScreenshotPNGBase64 = ""
+		response.Snapshot.ScreenshotOmitted = true
+	}
+	if request.IncludeAX != nil && !*request.IncludeAX {
+		// A screenshot cannot validate AX indexes, even if the window title matches.
+		// Invalidate every alias of the prior observation, including PID queries.
+		previous := s.currentSnapshot(app)
+		for alias, cached := range s.snapshots {
+			if cached == previous || cached.App.PID == response.Snapshot.App.PID ||
+				(previous != nil && cached.App.PID == previous.App.PID) {
+				delete(s.snapshots, alias)
+			}
+		}
+		response.Snapshot.Elements = nil
+		response.Snapshot.TreeLines = nil
+		response.Snapshot.FocusedSummary = ""
+		response.Snapshot.SelectedText = ""
 	}
 	response.Snapshot.sanitizeScreenshot()
 	s.rememberSnapshot(app, response.Snapshot)
@@ -639,6 +679,18 @@ func requiredString(args map[string]any, key string) string {
 func optionalString(args map[string]any, key string) string {
 	value, _ := args[key].(string)
 	return value
+}
+
+func optionalBool(args map[string]any, key string) (*bool, error) {
+	value, exists := args[key]
+	if !exists {
+		return nil, nil
+	}
+	boolean, ok := value.(bool)
+	if !ok {
+		return nil, fmt.Errorf("%s must be a boolean", key)
+	}
+	return &boolean, nil
 }
 
 func requiredElementIndex(args map[string]any) string {
@@ -861,14 +913,16 @@ func toolDefinitions() []toolDefinition {
 		},
 		{
 			Name:        "get_app_state",
-			Description: "Get the state of an already running app's key window and return a screenshot and accessibility tree. This must be called once per assistant turn before interacting with the app. This tool is part of plugin `Computer Use`.",
+			Description: "Get the state of an already running app's key window. By default returns a screenshot and accessibility tree; include_ax/include_screenshot can opt out of either collection. This must be called once per assistant turn before interacting with the app. This tool is part of plugin `Computer Use`.",
 			Annotations: readOnlyAnnotations(),
 			InputSchema: objectSchema(map[string]any{
-				"app":              stringProperty("App name or bundle identifier"),
-				"text_limit":       textLimitProperty("Maximum text characters to return. Use \"max\" for full text. Defaults to 500."),
-				"max_tree_nodes":   positiveIntegerProperty("Maximum accessibility tree nodes to render. Defaults to 1200."),
-				"max_tree_depth":   positiveIntegerProperty("Maximum accessibility tree depth to render. Defaults to 64."),
-				"window_placement": enumStringProperty("keep (default) leaves the window where it is. agent_display and restore are macOS-only and not supported on Windows.", windowPlacementValues),
+				"include_ax":         map[string]any{"type": "boolean", "default": true, "description": "Include accessibility tree, focus and selection. False skips AX collection and invalidates prior element indexes; coordinate actions remain available."},
+				"include_screenshot": map[string]any{"type": "boolean", "default": true, "description": "Capture and return a screenshot. False skips capture and PNG encoding."},
+				"app":                stringProperty("App name or bundle identifier"),
+				"text_limit":         textLimitProperty("Maximum text characters to return. Use \"max\" for full text. Defaults to 500."),
+				"max_tree_nodes":     positiveIntegerProperty("Maximum accessibility tree nodes to render. Defaults to 1200."),
+				"max_tree_depth":     positiveIntegerProperty("Maximum accessibility tree depth to render. Defaults to 64."),
+				"window_placement":   enumStringProperty("keep (default) leaves the window where it is. agent_display and restore are macOS-only and not supported on Windows.", windowPlacementValues),
 			}, []string{"app"}),
 		},
 		{
@@ -1023,13 +1077,16 @@ func runCLI(args []string, stdout io.Writer) error {
 		fmt.Fprintln(stdout, result.Content[0].Text)
 		return nil
 	case "snapshot":
-		app, textLimit, maxTreeNodes, maxTreeDepth, err := parseSnapshotArgs(args[1:])
+		snapshotArgs, observation, err := parseSnapshotObservationArgs(args[1:])
 		if err != nil {
 			return err
 		}
-		toolArgs := map[string]any{
-			"app": app,
+		app, textLimit, maxTreeNodes, maxTreeDepth, err := parseSnapshotArgs(snapshotArgs)
+		if err != nil {
+			return err
 		}
+		toolArgs := observation
+		toolArgs["app"] = app
 		if textLimit != nil {
 			toolArgs["text_limit"] = textLimit.runtimeValue()
 		}
@@ -1062,6 +1119,37 @@ func runCLI(args []string, stdout io.Writer) error {
 	default:
 		return fmt.Errorf("unknown command: %s\n\n%s", args[0], helpText(""))
 	}
+}
+
+func parseSnapshotObservationArgs(args []string) ([]string, map[string]any, error) {
+	remaining := []string{}
+	options := map[string]any{}
+	for index := 0; index < len(args); index++ {
+		option := args[index]
+		if option != "--include-ax" && option != "--include-screenshot" {
+			remaining = append(remaining, option)
+			continue
+		}
+		index++
+		if index >= len(args) {
+			return nil, nil, fmt.Errorf("%s requires true or false", option)
+		}
+		var value bool
+		switch strings.ToLower(args[index]) {
+		case "true":
+			value = true
+		case "false":
+			value = false
+		default:
+			return nil, nil, fmt.Errorf("%s requires true or false", option)
+		}
+		key := strings.ReplaceAll(strings.TrimPrefix(option, "--"), "-", "_")
+		options[key] = value
+	}
+	if options["include_ax"] == false && options["include_screenshot"] == false {
+		return nil, nil, errors.New("At least one of include_ax or include_screenshot must be true")
+	}
+	return remaining, options, nil
 }
 
 func parseSnapshotArgs(args []string) (string, *textLimit, *int, *int, error) {
@@ -1367,7 +1455,7 @@ func helpText(command string) string {
 	case "call":
 		return "Usage:\n  open-computer-use.exe call <tool> [--args '<json-object>']\n  open-computer-use.exe call --calls '<json-array>'\n\nThe JSON array form keeps all calls in one process so element_index state can be reused.\n"
 	case "snapshot":
-		return "Usage:\n  open-computer-use.exe snapshot [--text-limit <positive-int|max>] [--max-tree-nodes <positive-int>] [--max-tree-depth <positive-int>] <app>\n\nPrint the current Windows UI Automation snapshot for the target app.\n"
+		return "Usage:\n  open-computer-use.exe snapshot [--include-ax true|false] [--include-screenshot true|false] [--text-limit <positive-int|max>] [--max-tree-nodes <positive-int>] [--max-tree-depth <positive-int>] <app>\n\nPrint the current Windows UI Automation snapshot for the target app.\n"
 	default:
 		return `Open Computer Use for Windows
 

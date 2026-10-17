@@ -94,6 +94,8 @@ public enum ToolDefinitions {
             annotations: defaultAnnotations(),
             inputSchema: objectSchema(
                 properties: [
+                    "include_ax": ["type": "boolean", "default": true, "description": "Include accessibility tree, focus and selection. False skips collection and invalidates previous element indexes; read AX again before element actions."],
+                    "include_screenshot": ["type": "boolean", "default": true, "description": "Capture and return a screenshot. False skips capture and encoding; screenshot-coordinate actions require a fresh screenshot."],
                     "app": stringProperty(description: "App name or bundle identifier"),
                     "text_limit": textLimitProperty(description: "Maximum text characters to return. Use \"max\" for full text. Defaults to 500."),
                     "max_tree_nodes": positiveIntegerProperty(description: "Maximum accessibility tree nodes to render. Defaults to 1200."),

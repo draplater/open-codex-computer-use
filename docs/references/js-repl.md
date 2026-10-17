@@ -54,13 +54,13 @@ typeText(text, options?)
 performSecondaryAction(elementIndex, action)
 ```
 
-On Linux, observation methods also accept optional `includeAX` and
+On macOS, Windows and Linux, observation methods also accept optional `includeAX` and
 `includeScreenshot` booleans, both defaulting to true. Use
 `app.getAXState({includeScreenshot:false})` to skip native capture, or
 `app.getScreenshot({includeAX:false})` to skip the AX/focus walk. The latter
 invalidates previous element indexes; read AX again before element actions.
 Disabling both channels is rejected before a native call. These options do not
-deduplicate unchanged images. See [selective observation](../linux-selective-observation.md)
+deduplicate unchanged images. See [selective observation](../selective-observation.md)
 for collection semantics and real GTK/Worker validation.
 
 On macOS, `selectText` selects exact text inside a text element. `prefix` and `suffix`

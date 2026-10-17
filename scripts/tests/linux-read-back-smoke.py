@@ -327,6 +327,16 @@ def check_observation(client, native, name, state_file, stderr):
     expect_snapshot(ax)
     assert all(item["type"] != "image" for item in ax["content"]), ax
     assert "Selected text: [中文🙂]" in text(ax), text(ax)
+    refused = client.call("click", name, x=10, y=10)
+    assert refused.get("isError") and "include_screenshot=false" in text(refused), refused
+    # The standalone snapshot and JSON call entry points must preserve flags.
+    cli = subprocess.run([native, "snapshot", "--include-screenshot", "false", name],
+                         check=True, capture_output=True, text=True, timeout=40)
+    assert "Read-back input" in cli.stdout and "include_screenshot=false" in cli.stdout, cli.stdout
+    cli = subprocess.run([native, "call", "get_app_state", "--args",
+                          json.dumps({"app": name, "include_screenshot": False})],
+                         check=True, capture_output=True, text=True, timeout=40)
+    assert all(item["type"] != "image" for item in json.loads(cli.stdout)["content"]), cli.stdout
     old_index = element_index(ax, "Read-back input")
     invalid = client.call("get_app_state", name, include_ax=False, include_screenshot=False)
     assert invalid.get("isError"), invalid

@@ -692,11 +692,38 @@ function Get-SelectedText($processId, $TextLimit = $script:DefaultTextLimit) {
     return $null
 }
 
-function Build-Snapshot([string]$query, $TextLimit = $script:DefaultTextLimit, [int]$MaxTreeNodes = $script:AccessibilityTreeMaxNodeCount, [int]$MaxTreeDepth = $script:AccessibilityTreeMaxDepth) {
+function Resolve-ObservationOptions($operation) {
+    $values = @{ include_ax = $true; include_screenshot = $true }
+    foreach ($key in @("include_ax", "include_screenshot")) {
+        $property = $operation.PSObject.Properties[$key]
+        if ($null -ne $property) {
+            if ($property.Value -isnot [bool]) { throw "$key must be a boolean" }
+            $values[$key] = $property.Value
+        }
+    }
+    if (-not $values.include_ax -and -not $values.include_screenshot) {
+        throw "At least one of include_ax or include_screenshot must be true"
+    }
+    return [pscustomobject]$values
+}
+
+function Build-Snapshot([string]$query, $TextLimit = $script:DefaultTextLimit, [int]$MaxTreeNodes = $script:AccessibilityTreeMaxNodeCount, [int]$MaxTreeDepth = $script:AccessibilityTreeMaxDepth, [bool]$IncludeAX = $true, [bool]$IncludeScreenshot = $true) {
+    if (-not $IncludeAX -and -not $IncludeScreenshot) {
+        throw "At least one of include_ax or include_screenshot must be true"
+    }
     $process = Resolve-App $query
     $element = Get-MainElement $process
     $bounds = Get-WindowBounds $process $element
-    $rendered = Render-Tree $element $bounds $TextLimit $MaxTreeNodes $MaxTreeDepth
+    $rendered = @{ lines = @(); records = @() }
+    $focus = $null
+    $selection = $null
+    $image = $null
+    if ($IncludeAX) {
+        $rendered = Render-Tree $element $bounds $TextLimit $MaxTreeNodes $MaxTreeDepth
+        $focus = Get-FocusedSummary $process.Id $TextLimit
+        $selection = Get-SelectedText $process.Id $TextLimit
+    }
+    if ($IncludeScreenshot) { $image = Capture-WindowPngBase64 $bounds }
     [pscustomobject]@{
         app = [pscustomobject]@{
             name = $process.ProcessName
@@ -705,10 +732,10 @@ function Build-Snapshot([string]$query, $TextLimit = $script:DefaultTextLimit, [
         }
         windowTitle = Limit-Text $process.MainWindowTitle $TextLimit
         windowBounds = $bounds
-        screenshotPngBase64 = Capture-WindowPngBase64 $bounds
+        screenshotPngBase64 = $image
         treeLines = @($rendered.lines)
-        focusedSummary = Get-FocusedSummary $process.Id $TextLimit
-        selectedText = Get-SelectedText $process.Id $TextLimit
+        focusedSummary = $focus
+        selectedText = $selection
         elements = @($rendered.records)
     }
 }
@@ -982,7 +1009,8 @@ try {
     if ($operation.tool -eq "list_apps") {
         $response = [pscustomobject]@{ ok = $true; text = (List-Apps) }
     } elseif ($operation.tool -eq "get_app_state") {
-        $response = [pscustomobject]@{ ok = $true; snapshot = (Build-Snapshot $operation.app (Resolve-TextLimit $operation.text_limit) ([int]$operation.max_tree_nodes) ([int]$operation.max_tree_depth)) }
+        $observation = Resolve-ObservationOptions $operation
+        $response = [pscustomobject]@{ ok = $true; snapshot = (Build-Snapshot $operation.app (Resolve-TextLimit $operation.text_limit) ([int]$operation.max_tree_nodes) ([int]$operation.max_tree_depth) $observation.include_ax $observation.include_screenshot) }
     } else {
         $process = Resolve-App $operation.app
         $hwnd = [IntPtr]$process.MainWindowHandle

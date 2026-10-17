@@ -43,5 +43,5 @@ jobs:
         run: |
           powershell.exe -NoProfile -NonInteractive -File ./scripts/tests/windows-observation.test.ps1 -RuntimePath apps/OpenComputerUseWindows/runtime.ps1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Real WinForms and native MCP
+      - name: Real WPF and native MCP
         run: ./scripts/tests/windows-observation-smoke.ps1 -NativePath "$env:RUNNER_TEMP/ocu-observation.exe"

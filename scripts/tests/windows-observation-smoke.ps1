@@ -39,7 +39,7 @@ function Call-Tool($tool, $arguments) {
 function Text($result) { ($result.content | Where-Object type -eq "text" | ForEach-Object text) -join "`n" }
 function Images($result) { @($result.content | Where-Object type -eq "image") }
 function Input-Index($result) {
-    # Legacy WinForms providers may expose the field's initial text as Name
+    # Legacy WPF providers may expose the field's initial text as Name
     # instead of AccessibleName. Both identify our one disposable input.
     $matches = [regex]::Matches((Text $result), '(?m)^\s*(\d+)\s+[^\r\n]*(?:Observation input|initial-value)(?:\s|$)')
     Assert ($matches.Count -eq 1) (Text $result)
@@ -55,7 +55,7 @@ function Change-Window($kind) {
 try {
     $fixtureSource = Join-Path $PSScriptRoot "fixtures/WindowsObservationFixture.ps1"
     $fixture = Start-Process powershell.exe -ArgumentList @("-NoProfile", "-STA", "-File", "`"$fixtureSource`"", "-StatePath", "`"$stateFile`"") -PassThru
-    Wait-For { Test-Path -LiteralPath $stateFile } "WinForms startup"
+    Wait-For { Test-Path -LiteralPath $stateFile } "WPF startup"
     $start = New-Object System.Diagnostics.ProcessStartInfo
     $start.FileName = $NativePath
     $start.Arguments = "mcp"
@@ -70,7 +70,7 @@ try {
     $null = Send-Request "initialize" @{ protocolVersion = "2025-03-26"; capabilities = @{}; clientInfo = @{ name = "windows-observation-smoke"; version = "1" } }
     $full = Call-Tool "get_app_state" @{}
     Assert (-not $full.isError -and (Images $full).Count -eq 1) (Text $full)
-    Write-Output "Normal WinForms window returned a validated PNG."
+    Write-Output "Normal WPF window returned a validated PNG."
     $oldIndex = Input-Index $full
     $image = Call-Tool "get_app_state" @{ include_ax = $false }
     Assert (-not $image.isError -and (Images $image).Count -eq 1) (Text $image)
@@ -102,7 +102,7 @@ try {
     Assert ($LASTEXITCODE -eq 0 -and ($cli -join "`n") -match "include_screenshot=false") "CLI flag not forwarded"
     & node (Join-Path $PSScriptRoot "windows-observation-js-smoke.mjs") $NativePath ([string]$fixture.Id) $stateFile
     Assert ($LASTEXITCODE -eq 0) "Worker JS desktop smoke failed"
-    Write-Output "Windows real WinForms/native MCP/CLI: channels, stale indexes, AX recovery, coordinate refusal, Unicode text update, 1x1/minimized/cloaked screenshot filtering passed."
+    Write-Output "Windows real WPF/native MCP/CLI: channels, stale indexes, AX recovery, coordinate refusal, Unicode text update, 1x1/minimized/cloaked screenshot filtering passed."
 } finally {
     if ($null -ne $native -and -not $native.HasExited) {
         $native.StandardInput.Close()

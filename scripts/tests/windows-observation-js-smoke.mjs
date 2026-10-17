@@ -41,7 +41,7 @@ try {
   const full = await run("await app.getAXStateAndScreenshot();");
   assert.equal(full.content.filter(item => item.type === "image").length, 1);
   assert.ok(full.content.some(item => item.type === "text" && item.text.includes("worker-live-中文")));
-  console.log("Windows Worker JS → native MCP → WinForms: channels, stale-index errors, Unicode update and default full observation passed.");
+  console.log("Windows Worker JS → native MCP → WPF: channels, stale-index errors, Unicode update and default full observation passed.");
 } finally {
   await session?.close();
   native.close();

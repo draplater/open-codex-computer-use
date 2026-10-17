@@ -9,8 +9,15 @@ public static class ObservationDwm {
     public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
     [DllImport("user32.dll")]
     public static extern bool GetWindowRect(IntPtr hwnd, out RECT rect);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern IntPtr CreateWindowEx(uint extendedStyle, string windowClass, string title, uint style,
+        int x, int y, int width, int height, IntPtr parent, IntPtr menu, IntPtr instance, IntPtr parameter);
     [DllImport("user32.dll")]
-    public static extern bool SetWindowPos(IntPtr hwnd, IntPtr after, int x, int y, int width, int height, uint flags);
+    public static extern bool DestroyWindow(IntPtr hwnd);
+    public static IntPtr CreateTinyWindow() {
+        return CreateWindowEx(0, "STATIC", "OCU Windows Observation Fixture", 0x90000000u,
+            80, 80, 1, 1, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
+    }
     [DllImport("dwmapi.dll")]
     public static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
     [DllImport("dwmapi.dll")]
@@ -33,6 +40,7 @@ $inputBox.Text = "initial-value"
 $window.Content = $inputBox
 $state = @{ sequence = 0; text = ""; width = 0; height = 0; minimized = $false; cloakHResult = 0; cloaked = 0 }
 $stateEncoding = New-Object System.Text.UTF8Encoding($false)
+$tinyWindow = @{ handle = [IntPtr]::Zero }
 $commandPath = $StatePath + ".command"
 $timer = New-Object System.Windows.Threading.DispatcherTimer
 $timer.Interval = [TimeSpan]::FromMilliseconds(50)
@@ -44,16 +52,11 @@ $timer.Add_Tick({
             if ($command.sequence -gt $state.sequence) {
                 switch ($command.kind) {
                     "tiny" {
-                        $window.WindowStyle = "None"
-                        $window.ResizeMode = "NoResize"
-                        $window.MinWidth = 0
-                        $window.MinHeight = 0
-                        $window.Width = 1
-                        $window.Height = 1
-                        # WPF applies a system minimum even to a borderless
-                        # window. Force the native boundary case explicitly.
-                        $hwnd = (New-Object System.Windows.Interop.WindowInteropHelper($window)).Handle
-                        [void][ObservationDwm]::SetWindowPos($hwnd, [IntPtr]::Zero, 0, 0, 1, 1, 0x16)
+                        # WPF rounds a one-DIP window to multiple physical
+                        # pixels on high-DPI desktops. Use an owned Win32
+                        # fixture window for the exact physical 1x1 case.
+                        $window.Hide()
+                        $tinyWindow.handle = [ObservationDwm]::CreateTinyWindow()
                     }
                     "minimize" { $window.WindowState = "Minimized" }
                     "cloak" {
@@ -63,17 +66,22 @@ $timer.Add_Tick({
                     "restore" {
                         $value = 0
                         [void][ObservationDwm]::DwmSetWindowAttribute($hwnd, 13, [ref]$value, 4)
+                        if ($tinyWindow.handle -ne [IntPtr]::Zero) {
+                            [void][ObservationDwm]::DestroyWindow($tinyWindow.handle)
+                            $tinyWindow.handle = [IntPtr]::Zero
+                        }
                         $window.WindowState = "Normal"
-                        $window.WindowStyle = "SingleBorderWindow"
-                        $window.ResizeMode = "CanResize"
                         $window.Width = 600
                         $window.Height = 280
+                        $window.Show()
                     }
                 }
                 $state.sequence = $command.sequence
             }
         } catch { }
     }
+    $hwnd = if ($tinyWindow.handle -ne [IntPtr]::Zero) { $tinyWindow.handle }
+            else { (New-Object System.Windows.Interop.WindowInteropHelper($window)).Handle }
     $cloaked = 0
     [void][ObservationDwm]::DwmGetWindowAttribute($hwnd, 14, [ref]$cloaked, 4)
     $state.cloaked = $cloaked

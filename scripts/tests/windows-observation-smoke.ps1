@@ -39,9 +39,11 @@ function Call-Tool($tool, $arguments) {
 function Text($result) { ($result.content | Where-Object type -eq "text" | ForEach-Object text) -join "`n" }
 function Images($result) { @($result.content | Where-Object type -eq "image") }
 function Input-Index($result) {
-    $match = [regex]::Match((Text $result), '(?m)^\s*(\d+)\s+[^\r\n]*Observation input(?:\s|$)')
-    Assert $match.Success (Text $result)
-    $match.Groups[1].Value
+    # Legacy WinForms providers may expose the field's initial text as Name
+    # instead of AccessibleName. Both identify our one disposable input.
+    $matches = [regex]::Matches((Text $result), '(?m)^\s*(\d+)\s+[^\r\n]*(?:Observation input|initial-value)(?:\s|$)')
+    Assert ($matches.Count -eq 1) (Text $result)
+    $matches[0].Groups[1].Value
 }
 function Change-Window($kind) {
     $script:sequence += 1
@@ -68,10 +70,11 @@ try {
     $null = Send-Request "initialize" @{ protocolVersion = "2025-03-26"; capabilities = @{}; clientInfo = @{ name = "windows-observation-smoke"; version = "1" } }
     $full = Call-Tool "get_app_state" @{}
     Assert (-not $full.isError -and (Images $full).Count -eq 1) (Text $full)
+    Write-Output "Normal WinForms window returned a validated PNG."
     $oldIndex = Input-Index $full
     $image = Call-Tool "get_app_state" @{ include_ax = $false }
     Assert (-not $image.isError -and (Images $image).Count -eq 1) (Text $image)
-    Assert ((Text $image) -match "indexes invalidated" -and (Text $image) -notmatch "Observation input") "AX not omitted"
+    Assert ((Text $image) -match "indexes invalidated" -and (Text $image) -notmatch "Observation input|initial-value") "AX not omitted"
     $stale = Call-Tool "set_value" @{ element_index = $oldIndex; value = "must-not-write" }
     Assert $stale.isError "Stale index accepted"
     $ax = Call-Tool "get_app_state" @{ include_screenshot = $false }
@@ -82,6 +85,7 @@ try {
     $write = Call-Tool "set_value" @{ element_index = (Input-Index $ax); value = $value }
     Assert (-not $write.isError) (Text $write)
     Wait-For { (Read-State).text -eq $value } "real UIA value update"
+    Write-Output "Selective channels, index refusal/recovery and real Unicode text update passed."
     foreach ($kind in @("tiny", "minimize", "cloak")) {
         Change-Window $kind
         if ($kind -eq "tiny") { Assert ((Read-State).width -eq 1 -and (Read-State).height -eq 1) "Window did not become 1x1" }
@@ -92,10 +96,11 @@ try {
         Change-Window "restore"
         $restored = Call-Tool "get_app_state" @{}
         Assert (-not $restored.isError -and (Images $restored).Count -eq 1) (Text $restored)
+        Write-Output "$kind window omitted its image; restored window returned a PNG."
     }
     $cli = & $NativePath snapshot --include-screenshot false ([string]$fixture.Id)
     Assert ($LASTEXITCODE -eq 0 -and ($cli -join "`n") -match "include_screenshot=false") "CLI flag not forwarded"
-    Write-Output "Windows real WinForms/native MCP/CLI: channels, stale indexes, AX recovery, coordinate refusal, Unicode UIA write, 1x1/minimized/cloaked screenshot filtering passed."
+    Write-Output "Windows real WinForms/native MCP/CLI: channels, stale indexes, AX recovery, coordinate refusal, Unicode text update, 1x1/minimized/cloaked screenshot filtering passed."
 } finally {
     if ($null -ne $native -and -not $native.HasExited) {
         $native.StandardInput.Close()

@@ -9,6 +9,8 @@ public static class ObservationDwm {
     public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
     [DllImport("user32.dll")]
     public static extern bool GetWindowRect(IntPtr hwnd, out RECT rect);
+    [DllImport("user32.dll")]
+    public static extern bool SetWindowPos(IntPtr hwnd, IntPtr after, int x, int y, int width, int height, uint flags);
     [DllImport("dwmapi.dll")]
     public static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
     [DllImport("dwmapi.dll")]
@@ -48,6 +50,10 @@ $timer.Add_Tick({
                         $window.MinHeight = 0
                         $window.Width = 1
                         $window.Height = 1
+                        # WPF applies a system minimum even to a borderless
+                        # window. Force the native boundary case explicitly.
+                        $hwnd = (New-Object System.Windows.Interop.WindowInteropHelper($window)).Handle
+                        [void][ObservationDwm]::SetWindowPos($hwnd, [IntPtr]::Zero, 0, 0, 1, 1, 0x16)
                     }
                     "minimize" { $window.WindowState = "Minimized" }
                     "cloak" {

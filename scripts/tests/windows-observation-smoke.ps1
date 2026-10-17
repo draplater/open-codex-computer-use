@@ -87,7 +87,10 @@ try {
     Write-Output "Selective channels, index refusal/recovery and real Unicode text update passed."
     foreach ($kind in @("tiny", "minimize", "cloak")) {
         Change-Window $kind
-        if ($kind -eq "tiny") { Assert ((Read-State).width -eq 1 -and (Read-State).height -eq 1) "Window did not become 1x1" }
+        if ($kind -eq "tiny") {
+            $state = Read-State
+            Assert ($state.width -eq 1 -and $state.height -eq 1) "Window did not become 1x1: $($state.width)x$($state.height)"
+        }
         if ($kind -eq "minimize") { Assert (Read-State).minimized "Window did not minimize" }
         if ($kind -eq "cloak") { Assert ((Read-State).cloakHResult -eq 0 -and (Read-State).cloaked -ne 0) "Window did not cloak" }
         $unusable = Call-Tool "get_app_state" @{}

@@ -80,7 +80,7 @@ $timer.Add_Tick({
     $temporary = $StatePath + ".tmp"
     [System.IO.File]::WriteAllText($temporary, ($state | ConvertTo-Json -Compress), $stateEncoding)
     try {
-        if (Test-Path -LiteralPath $StatePath) { [System.IO.File]::Replace($temporary, $StatePath, $null) }
+        if (Test-Path -LiteralPath $StatePath) { [System.IO.File]::Replace($temporary, $StatePath, ($StatePath + ".bak")) }
         else { [System.IO.File]::Move($temporary, $StatePath) }
     } catch [System.IO.IOException] { }
 })

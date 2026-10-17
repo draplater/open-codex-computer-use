@@ -39,8 +39,7 @@ function Call-Tool($tool, $arguments) {
 function Text($result) { ($result.content | Where-Object type -eq "text" | ForEach-Object text) -join "`n" }
 function Images($result) { @($result.content | Where-Object type -eq "image") }
 function Input-Index($result) {
-    # Legacy WPF providers may expose the field's initial text as Name
-    # instead of AccessibleName. Both identify our one disposable input.
+    # Permit the initial text as a fallback for older UIA providers.
     $matches = [regex]::Matches((Text $result), '(?m)^\s*(\d+)\s+[^\r\n]*(?:Observation input|initial-value)(?:\s|$)')
     Assert ($matches.Count -eq 1) (Text $result)
     $matches[0].Groups[1].Value
@@ -54,14 +53,9 @@ function Change-Window($kind) {
 }
 try {
     $fixtureSource = Join-Path $PSScriptRoot "fixtures/WindowsObservationFixture.ps1"
-    $fixture = Start-Process powershell.exe -ArgumentList @("-NoProfile", "-STA", "-File", "`"$fixtureSource`"", "-StatePath", "`"$stateFile`"") -PassThru
+    $fixture = Start-Process powershell.exe -ArgumentList @("-NoProfile", "-STA", "-File", "`"$fixtureSource`"", "-StatePath", "`"$stateFile`"") -PassThru -RedirectStandardOutput (Join-Path $directory "fixture.out") -RedirectStandardError (Join-Path $directory "fixture.err")
     Wait-For { Test-Path -LiteralPath $stateFile } "WPF startup"
     Wait-For { (Get-Process -Id $fixture.Id).MainWindowHandle -ne [IntPtr]::Zero } "visible WPF main window"
-    # The bridge uses Windows PowerShell/.NET Framework, while the controller
-    # may use pwsh/.NET. Diagnose only our disposable process on both hosts.
-    $probe = '$p = Get-Process -Id ' + $fixture.Id + '; $p | Select-Object Id, MainWindowHandle, MainWindowTitle | ConvertTo-Json -Compress; Get-Process | Where-Object Id -eq ' + $fixture.Id + ' | Select-Object Id, MainWindowHandle, MainWindowTitle | ConvertTo-Json -Compress'
-    & powershell.exe -NoProfile -NonInteractive -Command $probe
-    Write-Output ((Get-Process -Id $fixture.Id | Select-Object Id, MainWindowHandle, MainWindowTitle) | ConvertTo-Json -Compress)
     $start = New-Object System.Diagnostics.ProcessStartInfo
     $start.FileName = $NativePath
     $start.Arguments = "mcp"
@@ -115,5 +109,7 @@ try {
         if (-not $native.WaitForExit(3000)) { $native.Kill(); $native.WaitForExit() }
     }
     if ($null -ne $fixture -and -not $fixture.HasExited) { $fixture.Kill(); $fixture.WaitForExit() }
+    $fixtureError = Join-Path $directory "fixture.err"
+    if (Test-Path -LiteralPath $fixtureError) { Get-Content -LiteralPath $fixtureError | Write-Output }
     Remove-Item -LiteralPath $directory -Recurse -Force
 }

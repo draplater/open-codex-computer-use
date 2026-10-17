@@ -485,7 +485,7 @@ enum SnapshotBuilder {
             treeLines: lines,
             focusedSummary: focusedSummary,
             focusedElement: nil,
-            selectedText: nil,
+            selectedText: state.selectedText,
             windowElement: nil,
             elements: records
         )

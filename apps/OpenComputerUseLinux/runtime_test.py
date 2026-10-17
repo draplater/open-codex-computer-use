@@ -1,3 +1,4 @@
+import contextlib
 import importlib.util
 import pathlib
 import sys
@@ -184,8 +185,7 @@ class RuntimeSelectiveObservationTests(unittest.TestCase):
             "node_pid": 42,
             "node_name": "Editor",
             "render_tree": ([{"index": 7}], ["tree"]),
-            "focused_summary": "focus",
-            "selected_text": "selection",
+            "focus_details": ("focus", "selection", False),
             "capture_window_png": "png",
         }.items():
             patch = mock.patch.object(self.runtime, name, return_value=value)
@@ -197,8 +197,7 @@ class RuntimeSelectiveObservationTests(unittest.TestCase):
         state = self.runtime.build_snapshot("Editor")
         self.assertEqual(state["elements"], [{"index": 7}])
         self.assertEqual(state["screenshotPngBase64"], "png")
-        self.runtime.focused_summary.assert_called_once()
-        self.runtime.selected_text.assert_called_once()
+        self.runtime.focus_details.assert_called_once()
 
     def test_screenshot_only_skips_tree_focus_and_selection(self):
         state = self.runtime.build_snapshot("Editor", include_ax=False)
@@ -207,7 +206,7 @@ class RuntimeSelectiveObservationTests(unittest.TestCase):
         self.assertEqual(state["treeLines"], [])
         self.assertIsNone(state["focusedSummary"])
         self.assertIsNone(state["selectedText"])
-        for name in ("render_tree", "focused_summary", "selected_text"):
+        for name in ("render_tree", "focus_details"):
             getattr(self.runtime, name).assert_not_called()
 
     def test_ax_only_skips_capture(self):
@@ -228,6 +227,238 @@ class RuntimeSelectiveObservationTests(unittest.TestCase):
                 with self.assertRaises(RuntimeError):
                     self.runtime.perform_operation({"tool": "get_app_state", "app": "Editor", **flags})
         self.runtime.resolve_app.assert_not_called()
+
+
+class HiddenDetailsTests(unittest.TestCase):
+    def setUp(self):
+        self.runtime = load_runtime()
+        self.runtime.Atspi.StateType = types.SimpleNamespace(SHOWING="showing")
+
+    def node(self, showing):
+        node = mock.Mock()
+        node.get_name.return_value = "Menu"
+        node.get_role_name.return_value = "menu"
+        node.get_child_count.return_value = 0
+        node.get_state_set.return_value.contains.return_value = showing
+        return node
+
+    def test_hidden_record_retains_identity_and_skips_expensive_properties(self):
+        node = self.node(False)
+        with mock.patch.object(self.runtime, "relative_frame") as geometry, \
+             mock.patch.object(self.runtime, "element_value") as value, \
+             mock.patch.object(self.runtime, "action_names") as actions:
+            record = self.runtime.record_for(node, 7, [0, 3], None, lightweight_hidden=True)
+        self.assertEqual((record["index"], record["runtimeId"], record["name"]), (7, [0, 3], "Menu"))
+        self.assertTrue(record["detailsOmitted"])
+        for query in (geometry, value, actions):
+            query.assert_not_called()
+        node.get_toolkit_name.assert_not_called()
+        node.get_accessible_id.assert_not_called()
+
+    def test_default_and_unknown_or_showing_state_keep_full_details(self):
+        for enabled, showing in ((False, False), (True, True), (True, None)):
+            with self.subTest(enabled=enabled, showing=showing):
+                node = self.node(showing)
+                with mock.patch.object(self.runtime, "relative_frame", return_value=None), \
+                     mock.patch.object(self.runtime, "accessible_id", return_value="id"), \
+                     mock.patch.object(self.runtime, "element_value", return_value="value"), \
+                     mock.patch.object(self.runtime, "action_names", return_value=["open"]):
+                    record = self.runtime.record_for(node, 0, [0], None, lightweight_hidden=enabled)
+                self.assertNotIn("detailsOmitted", record)
+                self.assertEqual((record["value"], record["actions"]), ("value", ["open"]))
+                if not enabled:
+                    node.get_state_set.assert_not_called()
+
+    def test_hidden_parent_does_not_prune_visible_menu_children_or_renumber(self):
+        parent = self.node(False)
+        child = self.node(True)
+        parent.get_child_count.return_value = 1
+        parent.get_child_at_index.return_value = child
+        with mock.patch.dict(self.runtime.os.environ, {"OPEN_COMPUTER_USE_LINUX_LIGHTWEIGHT_HIDDEN": "1"}), \
+             mock.patch.object(self.runtime, "relative_frame", return_value=None), \
+             mock.patch.object(self.runtime, "accessible_id", return_value="id"), \
+             mock.patch.object(self.runtime, "element_value", return_value="value"), \
+             mock.patch.object(self.runtime, "action_names", return_value=[]):
+            records, lines = self.runtime.render_tree(parent, None, [0])
+        self.assertEqual([r["index"] for r in records], [0, 1])
+        self.assertTrue(records[0]["detailsOmitted"])
+        self.assertNotIn("detailsOmitted", records[1])
+        self.assertIn("hidden details omitted", lines[0])
+        self.assertEqual(records[1]["runtimeId"], [0, 0])
+
+    def test_failed_state_reads_keep_full_details(self):
+        for failure in ("state-set", "missing-state-set", "contains"):
+            with self.subTest(failure=failure):
+                node = self.node(False)
+                if failure == "state-set":
+                    node.get_state_set.side_effect = RuntimeError("state unavailable")
+                elif failure == "missing-state-set":
+                    node.get_state_set.return_value = None
+                else:
+                    node.get_state_set.return_value.contains.side_effect = RuntimeError("state unavailable")
+                with mock.patch.object(self.runtime, "relative_frame", return_value=None), \
+                     mock.patch.object(self.runtime, "element_value", return_value="retained"), \
+                     mock.patch.object(self.runtime, "action_names", return_value=["click"]):
+                    record = self.runtime.record_for(node, 0, [0], None, lightweight_hidden=True)
+                self.assertNotIn("detailsOmitted", record)
+                self.assertEqual((record["value"], record["actions"]), ("retained", ["click"]))
+
+    def test_showing_node_with_negative_geometry_keeps_details(self):
+        node = self.node(True)
+        bounds = {"x": -100, "y": -200, "width": 30, "height": 40}
+        with mock.patch.object(self.runtime, "relative_frame", return_value=bounds), \
+             mock.patch.object(self.runtime, "element_value", return_value="visible"), \
+             mock.patch.object(self.runtime, "action_names", return_value=["click"]):
+            record = self.runtime.record_for(node, 0, [0], None, lightweight_hidden=True)
+        self.assertNotIn("detailsOmitted", record)
+        self.assertEqual((record["frame"], record["value"], record["actions"]), (bounds, "visible", ["click"]))
+
+
+class FocusDetailsTests(unittest.TestCase):
+    def setUp(self):
+        self.runtime = load_runtime()
+        self.runtime.Atspi.StateType = types.SimpleNamespace(FOCUSED="focused")
+
+    def node(self, children=(), focused=False):
+        node = mock.Mock()
+        node.get_child_count.return_value = len(children)
+        node.get_child_at_index.side_effect = lambda i: children[i]
+        node.get_state_set.return_value.contains.side_effect = lambda s: focused
+        node.get_name.return_value = "Editor"
+        node.get_role_name.return_value = "text"
+        node.get_interfaces.return_value = ["Text"]
+        return node
+
+    def test_summary_and_selection_share_one_focus_lookup(self):
+        focused = self.node(focused=True)
+        root = self.node([focused])
+        self.runtime.Atspi.Text = types.SimpleNamespace(
+            get_n_selections=lambda _: 1,
+            get_selection=lambda _iface, index: types.SimpleNamespace(start_offset=1, end_offset=8),
+            get_text=lambda _iface, start, end: "hello"[start:end],
+        )
+        summary, selected, truncated = self.runtime.focus_details(root)
+        self.assertEqual((summary, selected, truncated), ("text Editor", "ello", False))
+        root.get_child_at_index.assert_called_once_with(0)
+        focused.get_state_set.assert_called_once()
+
+    def test_node_budget_reports_incomplete_instead_of_absent(self):
+        children = [self.node() for _ in range(100)]
+        root = self.node(children)
+        self.assertEqual(self.runtime.focus_details(root, max_nodes=3), (None, None, True))
+        self.assertEqual(root.get_child_at_index.call_count, 2)
+
+    def test_depth_budget_and_complete_absence(self):
+        root = self.node([self.node([self.node(focused=True)])])
+        self.assertEqual(self.runtime.focus_details(root, max_depth=1), (None, None, True))
+        self.assertEqual(self.runtime.focus_details(self.node()), (None, None, False))
+
+    def test_depth_boundary_does_not_fetch_out_of_budget_children(self):
+        boundary = self.node()
+        boundary.get_child_count.return_value = 100
+        boundary.get_child_at_index.side_effect = None
+        boundary.get_child_at_index.return_value = None
+        root = self.node([boundary])
+        self.assertEqual(self.runtime.focus_details(root, max_nodes=3, max_depth=1), (None, None, True))
+        boundary.get_child_at_index.assert_not_called()
+
+    def test_depth_boundary_leaf_is_complete(self):
+        root = self.node([self.node()])
+        self.assertEqual(self.runtime.focus_details(root, max_depth=1), (None, None, False))
+
+    def test_focus_after_a_pruned_branch_is_still_reported(self):
+        pruned = self.node([self.node()])
+        focused = self.node(focused=True)
+        root = self.node([pruned, focused])
+        self.assertEqual(self.runtime.focus_details(root, max_depth=1), ("text Editor", None, False))
+        pruned.get_child_at_index.assert_not_called()
+
+    def test_selection_uses_standard_atspi_api_and_character_offsets(self):
+        focused = self.node(focused=True)
+        self.runtime.Atspi.Text = types.SimpleNamespace(
+            get_n_selections=lambda _: 1,
+            get_selection=lambda _iface, index: types.SimpleNamespace(start_offset=1, end_offset=4),
+            get_text=lambda _iface, start, end: "a中文🙂z"[start:end],
+        )
+        self.assertEqual(self.runtime.focus_details(focused), ("text Editor", "中文🙂", False))
+        self.assertEqual(self.runtime.focus_details(focused, text_limit=2), ("text Ed...", "中文...", False))
+
+    def test_no_selection_does_not_fetch_a_range(self):
+        selection = mock.Mock()
+        self.runtime.Atspi.Text = types.SimpleNamespace(get_n_selections=lambda _: 0, get_selection=selection)
+        self.assertEqual(self.runtime.focus_details(self.node(focused=True)), ("text Editor", None, False))
+        selection.assert_not_called()
+
+    def test_selection_read_failure_keeps_the_focus_summary(self):
+        self.runtime.Atspi.Text = types.SimpleNamespace(
+            get_n_selections=lambda _: 1,
+            get_selection=mock.Mock(side_effect=RuntimeError("element became unavailable")),
+        )
+        self.assertEqual(self.runtime.focus_details(self.node(focused=True)), ("text Editor", None, False))
+
+    def test_snapshot_reports_focus_budget_exhaustion(self):
+        with mock.patch.object(self.runtime, "resolve_app"), \
+             mock.patch.object(self.runtime, "main_window", return_value=(0, self.node())), \
+             mock.patch.object(self.runtime, "extents"), \
+             mock.patch.object(self.runtime, "render_tree", return_value=([], [])), \
+             mock.patch.object(self.runtime, "focus_details", return_value=(None, None, True)) as focus, \
+             mock.patch.object(self.runtime, "node_pid", return_value=42), \
+             mock.patch.object(self.runtime, "node_name", return_value="Editor"), \
+             mock.patch.object(self.runtime, "capture_window_png"):
+            state = self.runtime.build_snapshot("Editor", max_tree_nodes=5, max_tree_depth=2)
+        self.assertIn("incomplete", state["treeLines"][0])
+        self.assertEqual(focus.call_args.args[2:], (5, 2))
+
+
+class RuntimeActionReadBackTests(unittest.TestCase):
+    def setUp(self):
+        self.runtime = load_runtime()
+        self.stack = contextlib.ExitStack()
+        self.addCleanup(self.stack.close)
+        self.stack.enter_context(mock.patch.object(self.runtime, "resolve_app"))
+        self.stack.enter_context(mock.patch.object(self.runtime, "main_window", return_value=(0, object())))
+        for name in ("extents", "find_element", "send_key", "send_drag", "send_mouse_click",
+                     "invoke_secondary_action", "scroll_element", "insert_text", "set_element_value"):
+            self.stack.enter_context(mock.patch.object(self.runtime, name))
+        self.snapshot = self.stack.enter_context(mock.patch.object(self.runtime, "build_snapshot", return_value={"elements": []}))
+        self.sleep = self.stack.enter_context(mock.patch.object(self.runtime.time, "sleep"))
+
+    def test_all_actions_skip_snapshot_and_settle_when_requested(self):
+        for tool, arguments in (
+            ("click", {"x": 1, "y": 2}),
+            ("drag", {"from_x": 1, "from_y": 2, "to_x": 3, "to_y": 4}),
+            ("press_key", {"key": "Return"}),
+            ("type_text", {"text": "hello"}),
+            ("set_value", {"value": "hello"}),
+            ("perform_secondary_action", {"action": "activate"}),
+            ("scroll", {"direction": "down", "pages": 1}),
+        ):
+            with self.subTest(tool=tool):
+                with mock.patch.object(self.runtime, "screen_point", side_effect=[(1, 2), (3, 4)]):
+                    result = self.runtime.perform_operation({"tool": tool, "app": "Editor", "skip_read_back": True, **arguments})
+                self.assertEqual(result, {"ok": True})
+                self.snapshot.assert_not_called()
+                self.sleep.assert_not_called()
+        self.runtime.send_key.assert_called_once_with("Return")
+        self.runtime.send_drag.assert_called_once_with(1, 2, 3, 4)
+        self.runtime.insert_text.assert_called_once()
+
+    def test_default_action_still_waits_and_returns_snapshot(self):
+        result = self.runtime.perform_operation({"tool": "press_key", "app": "Editor", "key": "Return"})
+        self.assertEqual(result, {"ok": True, "snapshot": {"elements": []}})
+        self.sleep.assert_called_once_with(0.12)
+        self.snapshot.assert_called_once_with("Editor")
+
+    def test_explicit_observation_is_not_suppressed(self):
+        result = self.runtime.perform_operation({"tool": "get_app_state", "app": "Editor", "skip_read_back": True})
+        self.assertIn("snapshot", result)
+        self.snapshot.assert_called_once()
+
+    def test_action_errors_are_not_suppressed(self):
+        self.runtime.send_key.side_effect = RuntimeError("input failed")
+        with self.assertRaisesRegex(RuntimeError, "input failed"):
+            self.runtime.perform_operation({"tool": "press_key", "app": "Editor", "key": "Return", "skip_read_back": True})
+        self.snapshot.assert_not_called()
 
 
 if __name__ == "__main__":

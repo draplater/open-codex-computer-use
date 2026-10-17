@@ -268,37 +268,45 @@ def parse_text_limit(value, fallback=DEFAULT_TEXT_LIMIT):
     return positive_int(value, fallback)
 
 
-def record_for(node, index, path, window_bounds, text_limit=DEFAULT_TEXT_LIMIT):
-    bounds = relative_frame(node, window_bounds)
+def record_for(node, index, path, window_bounds, text_limit=DEFAULT_TEXT_LIMIT, lightweight_hidden=False):
+    # Only an explicit non-SHOWING state qualifies. Errors/unknown state keep
+    # full details; geometry alone cannot prove that a menu/control is hidden.
+    showing = safe(lambda: node.get_state_set().contains(Atspi.StateType.SHOWING)) if lightweight_hidden else None
+    omit_details = showing is not None and not bool(showing)
+    bounds = None if omit_details else relative_frame(node, window_bounds)
     role = node_role(node)
     return {
         "index": index,
         "runtimeId": path[:],
-        "automationId": accessible_id(node),
+        "automationId": "" if omit_details else accessible_id(node),
         "name": limit_text(node_name(node), text_limit=text_limit),
         "controlType": role,
         "localizedControlType": role,
-        "className": str(safe(node.get_toolkit_name, "") or ""),
-        "value": element_value(node, text_limit=text_limit),
+        "className": "" if omit_details else str(safe(node.get_toolkit_name, "") or ""),
+        "value": "" if omit_details else element_value(node, text_limit=text_limit),
         "nativeWindowHandle": 0,
         "frame": bounds,
-        "actions": action_names(node),
+        "actions": [] if omit_details else action_names(node),
+        **({"detailsOmitted": True} if omit_details else {}),
     }
 
 
 def render_tree(root, window_bounds, root_path, text_limit=DEFAULT_TEXT_LIMIT, max_tree_nodes=MAX_ELEMENTS, max_tree_depth=MAX_DEPTH):
     records = []
     lines = []
+    lightweight_hidden = os.environ.get("OPEN_COMPUTER_USE_LINUX_LIGHTWEIGHT_HIDDEN", "").strip().lower() in {"1", "true", "yes", "on"}
 
     def visit(node, depth, path):
         if len(records) >= max_tree_nodes or depth > max_tree_depth or node is None:
             return
         index = len(records)
-        record = record_for(node, index, path, window_bounds, text_limit=text_limit)
+        record = record_for(node, index, path, window_bounds, text_limit=text_limit, lightweight_hidden=lightweight_hidden)
         records.append(record)
 
         role = record["localizedControlType"] or record["controlType"] or "element"
         title = record["name"] or record["automationId"] or ""
+        if record.get("detailsOmitted"):
+            title += " [hidden details omitted]"
         value_segment = ""
         if record["value"] and record["value"] != title:
             safe_value = record["value"].replace("\r", "\\r").replace("\n", "\\n")
@@ -385,50 +393,53 @@ def pixbuf_looks_black(pixbuf):
         return False
 
 
-def focused_summary(app_pid, text_limit=DEFAULT_TEXT_LIMIT):
-    try:
-        root = desktop()
-        for app in iter_apps():
-            if node_pid(app) != app_pid:
-                continue
-            _, win = main_window(app)
-            focused = find_first(
-                win, lambda node: state_contains(node, Atspi.StateType.FOCUSED)
-            )
-            if focused is None:
-                return None
-            role = node_role(focused)
-            name = limit_text(node_name(focused), text_limit=text_limit)
-            return (role + " " + name).strip()
-    except Exception:
+def focus_details(window, text_limit=DEFAULT_TEXT_LIMIT, max_nodes=MAX_ELEMENTS, max_depth=MAX_DEPTH):
+    """Find focus once, within the same node/depth budget as the snapshot."""
+    visited = 0
+    truncated = False
+
+    def visit(node, depth):
+        nonlocal visited, truncated
+        if visited >= max_nodes or depth > max_depth:
+            truncated = True
+            return None
+        visited += 1
+        if node is None:
+            return None
+        if state_contains(node, Atspi.StateType.FOCUSED):
+            return node
+        children = child_count(node)
+        if depth >= max_depth:
+            # Do not fetch children that cannot be visited. Otherwise a wide
+            # node at the depth boundary can bypass the node budget entirely.
+            truncated = truncated or children > 0
+            return None
+        for index in range(children):
+            if visited >= max_nodes:
+                truncated = True
+                break
+            found = visit(child_at(node, index), depth + 1)
+            if found is not None:
+                return found
         return None
 
-
-def selected_text(app_pid, text_limit=DEFAULT_TEXT_LIMIT):
-    try:
-        for app in iter_apps():
-            if node_pid(app) != app_pid:
-                continue
-            _, win = main_window(app)
-            focused = find_first(
-                win, lambda node: state_contains(node, Atspi.StateType.FOCUSED)
-            )
-            if focused is None or not supports_interface(focused, "Text"):
-                return None
-            text_iface = safe(focused.get_text_iface)
-            selections = safe(lambda: Atspi.Text.get_text_selections(text_iface), [])
-            if selections:
-                selection = selections[0]
-                end_offset = selection.end_offset
-                if text_limit is not None:
-                    end_offset = min(end_offset, selection.start_offset + text_limit + 1)
-                value = Atspi.Text.get_text(
-                    text_iface, selection.start_offset, end_offset
-                )
-                return limit_text(value, text_limit=text_limit)
-    except Exception:
-        return None
-    return None
+    focused = visit(window, 0)
+    if focused is None:
+        return None, None, truncated
+    summary = (node_role(focused) + " " + limit_text(node_name(focused), text_limit)).strip()
+    selection = None
+    if supports_interface(focused, "Text"):
+        text_iface = safe(focused.get_text_iface)
+        count = safe(lambda: Atspi.Text.get_n_selections(text_iface), 0)
+        selected = safe(lambda: Atspi.Text.get_selection(text_iface, 0)) if count > 0 else None
+        if selected is not None:
+            end = selected.end_offset
+            if text_limit is not None:
+                end = min(end, selected.start_offset + text_limit + 1)
+            selection = safe(lambda: Atspi.Text.get_text(text_iface, selected.start_offset, end))
+            if selection is not None:
+                selection = limit_text(selection, text_limit)
+    return summary, selection, False
 
 
 def build_snapshot(query, text_limit=DEFAULT_TEXT_LIMIT, max_tree_nodes=MAX_ELEMENTS, max_tree_depth=MAX_DEPTH, include_ax=True, include_screenshot=True):
@@ -436,6 +447,7 @@ def build_snapshot(query, text_limit=DEFAULT_TEXT_LIMIT, max_tree_nodes=MAX_ELEM
     window_index, window = main_window(app)
     bounds = extents(window)
     records, lines = [], []
+    focus, selection = None, None
     if include_ax:
         records, lines = render_tree(
             window,
@@ -445,6 +457,9 @@ def build_snapshot(query, text_limit=DEFAULT_TEXT_LIMIT, max_tree_nodes=MAX_ELEM
             max_tree_nodes=max_tree_nodes,
             max_tree_depth=max_tree_depth,
         )
+        focus, selection, focus_truncated = focus_details(window, text_limit, max_tree_nodes, max_tree_depth)
+        if focus_truncated:
+            lines.append("[Focus search incomplete: node/depth budget reached.]")
     pid = node_pid(app)
     return {
         "app": {
@@ -456,8 +471,8 @@ def build_snapshot(query, text_limit=DEFAULT_TEXT_LIMIT, max_tree_nodes=MAX_ELEM
         "windowBounds": bounds,
         "screenshotPngBase64": capture_window_png(bounds) if include_screenshot else None,
         "treeLines": lines,
-        "focusedSummary": focused_summary(pid, text_limit=text_limit) if include_ax else None,
-        "selectedText": selected_text(pid, text_limit=text_limit) if include_ax else None,
+        "focusedSummary": focus,
+        "selectedText": selection,
         "elements": records,
     }
 
@@ -882,6 +897,9 @@ def perform_operation(operation):
             raise RuntimeError("Cannot set a value for an element that is not settable")
     else:
         raise RuntimeError('unsupportedTool("{}")'.format(tool))
+
+    if operation.get("skip_read_back", False):
+        return {"ok": True}
 
     time.sleep(0.12)
     return {"ok": True, "snapshot": build_snapshot(operation.get("app", ""))}

@@ -18,6 +18,7 @@
 - macOS agent display 实机回归（会短暂创建并销毁一块 virtual display）：`OPEN_COMPUTER_USE_RUN_AGENT_DISPLAY_LIVE_TEST=1 swift test --filter AgentDisplayLiveTests`
 - macOS 其他 Desktop 实机回归（需要第二个 Desktop，测试会短暂切换 Space 启动目标）：`OPEN_COMPUTER_USE_RUN_CROSS_SPACE_LIVE_TEST=1 swift test --filter CrossSpaceLiveTests`
 - Linux runtime：`(cd apps/OpenComputerUseLinux && go test ./...)`、`./scripts/build-open-computer-use-linux.sh --arch arm64`
+- Linux 隐藏控件实测：`bash scripts/run-linux-read-back-smoke.sh /path/to/linux/open-computer-use --hidden-checks`，在私有 D-Bus / Xvfb 中验证真实 GTK 隐藏状态、属性读取、索引及页面切换；依赖与范围见 [测试说明](linux-hidden-details.md)。
 - Windows runtime：`(cd apps/OpenComputerUseWindows && go test ./...)`、`./scripts/build-open-computer-use-windows.sh --arch amd64`；截图相关变更还要在 Windows 交互桌面验证正常窗口有 image、1x1/minimized/cloaked 窗口无 image。
 - 本地诊断：
   - `open-computer-use doctor`
@@ -70,3 +71,9 @@ CI/CD 流程结构和 release 自动化的默认方案，统一写在 `docs/CICD
 
 - `python3 scripts/run-locked-use-smoke.py --app <signed-app> --guardian <guardian-binary> --fixture <demo-app> --confirm-lock-test` 通过正常 MCP 读取 / 点击 / 截图验证普通 enable 的闭环，不使用测试解锁 RPC 或 Keychain。成功后保留 Counter 窗口，失败先结束租约并等待双方保护释放。
 - 首次原生连接握手的响应预算为 8 秒，冷签名校验由独立的有界工作队列完成；动作、保护和插件 RPC 仍为 2 秒。策略观察过期停止当前工作并等待新观察，不永久禁用安装；确认认证策略变化才永久禁用当前服务 epoch。
+
+Locked Use Broker uses a one-second timer only when idle or awaiting manual unlock with both guards fully released. Any active / incomplete recovery state retains the 100 ms watchdog cadence; incoming state transitions restore it immediately. Policy observations remain once per second with the existing two-second freshness gate. This reduces idle wakeups without extending guard / permit deadlines.
+
+Known-peer heartbeat/message revalidation on macOS 14.4+ uses kernel code-hash requirements instead of repeated certificate/disk assessment on the control queue. Forwarded SCM_RIGHTS clients also enter through the signature worker pool with an eight-second deadline; cancellation releases only the borrowed descriptor after in-flight verification finishes, preventing descriptor reuse races without shutting down the caller’s live transport.
+
+Installer removal leaves StagedPlugins to authd. Installation waits only for an existing mismatched cache to disappear or match the expected signature hash, for at most 15 seconds. The smoke controller retains its verified demo after relock/dual release even if manual-unlock observation times out; that timeout remains a failed manual check.

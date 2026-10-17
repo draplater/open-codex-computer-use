@@ -74,6 +74,12 @@ actions require a fresh AX observation. Existing calls without these options kee
 their full native observation behavior. These flags are implemented by the Linux
 runtime only; action read-back and other platforms are unchanged.
 
+These options select collection, not image deduplication. An unchanged screenshot
+is still returned when requested. macOS/Linux JS actions already disable automatic
+read-back, and getAXState does not emit images; includeScreenshot:false additionally skips
+native capture on Linux. See `docs/linux-selective-observation.md` for real GTK
+and Worker JS validation.
+
 The code-first surface also forwards macOS background-operation options:
 
 ```js

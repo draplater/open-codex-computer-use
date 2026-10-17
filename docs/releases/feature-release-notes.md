@@ -13,7 +13,7 @@
 | 2026-10-15 | Linux 动作回读 | REPL 批量操作可省去每个动作后被丢弃的完整界面观察。 | Linux 开始支持现有的 `OPEN_COMPUTER_USE_ACTION_READ_BACK=0`，成功动作返回 `ok`，保留最后一次显式观察的索引缓存；默认原生 MCP 回读与显式 `get_app_state` 保持不变。 |
 | 2026-10-15 | Linux 焦点与选区 | 大型界面减少重复查找，预算不足时明确提示，选中文字能正确返回。 | 复用快照已选窗口，一次查找生成焦点摘要与选区；按节点和深度预算停止读取，使用标准 AT-SPI 选区接口，并补隔离 GTK 验证。 |
 | 2026-10-15 | Linux 隐藏控件详情 | 隐藏节点较多时，可减少不需要的属性读取。 | 新增默认关闭的 `OPEN_COMPUTER_USE_LINUX_LIGHTWEIGHT_HIDDEN`；保留节点、索引和可见子节点，状态未知时完整读取，补充真实 GTK 标签页及 native MCP 回归。详见 [使用与验证](../linux-hidden-details.md)。 |
-| 2026-10-15 | Linux 按需观察 | 调用方可显式只截图或只读 AX，省去不需要的采集开销。 | 新增默认均为 true 的 `include_ax` / `include_screenshot`；REPL 增加对应可选参数。纯截图明确使旧 AX 索引失效，默认观察和动作行为保持不变。 |
+| 2026-10-15 | Linux 按需观察 | 只需控件信息时可省去截图，只需画面时可省去 AX 遍历。 | 新增 `include_ax` / `include_screenshot` 及对应 JS 选项，默认保持完整采集；纯截图清理旧索引及别名，补应用重启回归和真实 GTK / Worker JS 测试。详见 [使用与验证](../linux-selective-observation.md)。 |
 | 2026-10-14 | 1.1.0 正式发布 | 用户可直接安装 Locked Use，在锁屏遮罩期间继续 GUI 操作，也可用定向查询和持久截图配置减少工具开销。 | 统一版本为 1.1.0；签名 universal macOS App 内嵌服务、Guardian、安装器和授权插件，普通 enable 请求权限，补齐冷启动握手隔离和发布制品检查；新增 app.query()、doctor --json 与 ocu config。 |
 | 2026-10-10 | macOS Locked Use 验证版 | 可在已登录 Mac 锁屏时，通过全屏遮罩继续 GUI 自动化，并在结束或本地接管后安全重锁。 | 正式组件采用 OCU Guardian / OCULockService / OCULockInstaller / OCULockAuth 短名称，开发 App 保留 Dev 区分；新增签名 Broker / 授权插件、双进程显示器保护、一次性许可、租约排空 / 恢复及构建和实机验证脚本；管理员显式启用 validation profile，生产 backend 在完整验证前保持关闭。 |
 | 2026-10-10 | macOS 定向 AX 查询 | 知道控件文案时，可以直接查询并操作，不必先获取截图和完整 AX tree。 | 新增 native `query` 和 JS `app.query()`，按文字、角色和窗口查找元素，返回完整性元数据；查询索引仅在同一会话内有效，操作前重新验证目标和位置。 |

@@ -535,7 +535,8 @@ func (s *service) refreshSnapshot(app string, request linuxRequest) (*appSnapsho
 		// Invalidate every alias of the prior observation, including PID queries.
 		previous := s.currentSnapshot(app)
 		for alias, cached := range s.snapshots {
-			if cached == previous || cached.App.PID == response.Snapshot.App.PID {
+			if cached == previous || cached.App.PID == response.Snapshot.App.PID ||
+				(previous != nil && cached.App.PID == previous.App.PID) {
 				delete(s.snapshots, alias)
 			}
 		}

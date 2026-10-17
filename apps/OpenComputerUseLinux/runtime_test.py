@@ -215,6 +215,14 @@ class RuntimeSelectiveObservationTests(unittest.TestCase):
         self.assertIsNone(state["screenshotPngBase64"])
         self.runtime.capture_window_png.assert_not_called()
 
+    def test_ax_only_preserves_bounded_focus_reporting(self):
+        self.runtime.focus_details.return_value = (None, None, True)
+        state = self.runtime.build_snapshot("Editor", text_limit=20, max_tree_nodes=2,
+                                            max_tree_depth=1, include_screenshot=False)
+        self.runtime.focus_details.assert_called_once_with(self.window, 20, 2, 1)
+        self.assertIn("[Focus search incomplete: node/depth budget reached.]", state["treeLines"])
+        self.runtime.capture_window_png.assert_not_called()
+
     def test_tool_forwards_explicit_observation_flags(self):
         state = self.runtime.perform_operation({"tool": "get_app_state", "app": "Editor", "include_ax": False})
         self.assertTrue(state["ok"])

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Exercise native Linux MCP actions against an isolated real GTK fixture."""
+"""Exercise native Linux MCP observation and actions against an isolated GTK fixture."""
 
 import argparse
+import base64
 from contextlib import ExitStack
 import importlib.util
 import json
@@ -10,6 +11,7 @@ from pathlib import Path
 import re
 import select
 import subprocess
+import struct
 import sys
 import tempfile
 import time
@@ -285,14 +287,88 @@ def check_hidden(client, native, name, state_file, stderr):
     print("Native MCP: default/opt-in output, stable indexes, page changes and full detail restoration passed.")
 
 
-def smoke(native, focus_checks=False, hidden_checks=False):
+def check_observation(client, native, name, state_file, stderr):
+    wait_for(lambda: json.loads(state_file.read_text())["selected"] == "中文🙂", "fixture selection")
+    runtime_path = Path(__file__).resolve().parents[2] / "apps/OpenComputerUseLinux/runtime.py"
+    spec = importlib.util.spec_from_file_location("observation_smoke_runtime", runtime_path)
+    runtime = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(runtime)
+
+    def png(data):
+        raw = base64.b64decode(data, validate=True)
+        assert raw[:8] == b"\x89PNG\r\n\x1a\n" and raw[12:16] == b"IHDR", raw[:24]
+        width, height = struct.unpack(">II", raw[16:24])
+        assert width > 0 and height > 0, (width, height)
+
+    def snapshot(**flags):
+        with ExitStack() as stack:
+            calls = {key: stack.enter_context(mock.patch.object(runtime, key, wraps=getattr(runtime, key)))
+                     for key in ("render_tree", "focus_details", "capture_window_png")}
+            result = runtime.build_snapshot(name, **flags)
+            return result, {key: query.call_count for key, query in calls.items()}
+
+    full, counts = snapshot()
+    assert counts == {"render_tree": 1, "focus_details": 1, "capture_window_png": 1}, counts
+    png(full["screenshotPngBase64"])
+    assert full["selectedText"] == "中文🙂", full
+    ax, counts = snapshot(include_screenshot=False)
+    assert counts == {"render_tree": 1, "focus_details": 1, "capture_window_png": 0}, counts
+    assert ax["screenshotPngBase64"] is None and ax["elements"] == full["elements"], ax
+    assert ax["selectedText"] == "中文🙂", ax
+    image, counts = snapshot(include_ax=False)
+    assert counts == {"render_tree": 0, "focus_details": 0, "capture_window_png": 1}, counts
+    png(image["screenshotPngBase64"])
+    assert image["elements"] == [] and image["treeLines"] == [], image
+    assert image["focusedSummary"] is None and image["selectedText"] is None, image
+    assert image["windowBounds"] == full["windowBounds"], image
+    print("Real GTK collection: full, AX-only (no capture), image-only (no tree/focus) passed.")
+
+    ax = client.call("get_app_state", name, include_screenshot=False)
+    expect_snapshot(ax)
+    assert all(item["type"] != "image" for item in ax["content"]), ax
+    assert "Selected text: [中文🙂]" in text(ax), text(ax)
+    old_index = element_index(ax, "Read-back input")
+    invalid = client.call("get_app_state", name, include_ax=False, include_screenshot=False)
+    assert invalid.get("isError"), invalid
+    image = client.call("get_app_state", name, include_ax=False)
+    assert not image.get("isError"), image
+    images = [item for item in image["content"] if item["type"] == "image"]
+    assert len(images) == 1, image
+    png(images[0]["data"])
+    assert "indexes invalidated" in text(image), text(image)
+    for omitted in ("Read-back input", "The focused UI element", "Selected text:"):
+        assert omitted not in text(image), text(image)
+    for alias in (name, str(full["app"]["pid"])):
+        result = client.call("set_value", alias, element_index=old_index, value="must-not-write")
+        assert result.get("isError"), result
+    assert json.loads(state_file.read_text())["text"] == "prefix-中文🙂-suffix"
+
+    button = next(row for row in full["elements"] if row["name"] == "Increment")
+    bounds = button["frame"]
+    result = client.call("click", name, x=bounds["x"] + bounds["width"] / 2,
+                         y=bounds["y"] + bounds["height"] / 2)
+    assert not result.get("isError"), result
+    wait_for(lambda: json.loads(state_file.read_text())["count"] == 1, "coordinate click after image-only read")
+    refreshed = client.call("get_app_state", name, include_screenshot=False)
+    expect_snapshot(refreshed)
+    result = client.call("set_value", name, element_index=element_index(refreshed, "Read-back input"),
+                         value="selective-中文🙂")
+    assert not result.get("isError"), result
+    wait_for(lambda: json.loads(state_file.read_text())["text"] == "selective-中文🙂", "AX index recovery")
+    print("Native MCP: valid PNG, omitted channels, stale name/PID indexes refused, coordinate action and AX recovery passed.")
+
+    subprocess.run(["node", str(Path(__file__).with_name("linux-observation-js-smoke.mjs")),
+                    native, name, str(state_file)], check=True, timeout=30)
+
+
+def smoke(native, focus_checks=False, hidden_checks=False, observation_checks=False):
     with tempfile.TemporaryDirectory(prefix="ocu-read-back-smoke-") as directory:
         directory = Path(directory)
         state_file = directory / "state.json"
         name = "OCUReadBackFixture" + str(os.getpid())
         with (directory / "stderr.log").open("w+") as stderr:
             arguments = [sys.executable, __file__, "--fixture", name, "--state-file", str(state_file)]
-            if focus_checks:
+            if focus_checks or observation_checks:
                 arguments.append("--focus-checks")
             if hidden_checks:
                 arguments.append("--hidden-checks")
@@ -307,6 +383,9 @@ def smoke(native, focus_checks=False, hidden_checks=False):
                 wait_for(lambda: not client.call("get_app_state", name).get("isError"), "AT-SPI registration")
                 if focus_checks:
                     check_focus(client, name, state_file)
+                    return
+                if observation_checks:
+                    check_observation(client, native, name, state_file, stderr)
                     return
                 if hidden_checks:
                     check_hidden(client, native, name, state_file, stderr)
@@ -381,6 +460,7 @@ if __name__ == "__main__":
     checks = parser.add_mutually_exclusive_group()
     checks.add_argument("--focus-checks", action="store_true")
     checks.add_argument("--hidden-checks", action="store_true")
+    checks.add_argument("--observation-checks", action="store_true")
     parser.add_argument("--state-file", type=Path)
     args = parser.parse_args()
     if args.fixture:
@@ -388,4 +468,4 @@ if __name__ == "__main__":
     else:
         if not args.native:
             parser.error("--native is required")
-        smoke(str(Path(args.native).resolve()), args.focus_checks, args.hidden_checks)
+        smoke(str(Path(args.native).resolve()), args.focus_checks, args.hidden_checks, args.observation_checks)

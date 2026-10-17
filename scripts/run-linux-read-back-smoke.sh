@@ -3,7 +3,7 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 if [[ "$(uname -s)" != Linux || $# -lt 1 ]]; then
-  echo "Usage (Linux): bash scripts/run-linux-read-back-smoke.sh /path/to/open-computer-use [--focus-checks | --hidden-checks]" >&2
+  echo "Usage (Linux): bash scripts/run-linux-read-back-smoke.sh /path/to/open-computer-use [--focus-checks | --hidden-checks | --observation-checks]" >&2
   exit 2
 fi
 

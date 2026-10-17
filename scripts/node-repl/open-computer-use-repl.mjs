@@ -265,6 +265,9 @@ function optionsToSnapshotArgs(options = {}) {
       args[argument] = options[option];
     }
   }
+  if (args.include_ax === false && args.include_screenshot === false) {
+    throw new Error("At least one of includeAX or includeScreenshot must be true");
+  }
   return args;
 }
 

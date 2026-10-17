@@ -34,3 +34,19 @@ Changing `getScreenshot()` defaults would also change its implicit index refresh
 - `skills/open-computer-use/references/usage.md`
 - `docs/ARCHITECTURE.md`
 - `docs/releases/feature-release-notes.md`
+
+## 2026-10-17：同步主线、修复别名遗漏并补实测
+
+用户要求处理 #101，基于最新 main 解决冲突、检查测试并推送，补真实 GTK；同时评估截图可选与未变化图片重复返回的关系。
+
+- 合入主线 `7cb8bb7`（含 #103），保留原贡献提交及两边的 Go / Python 测试、架构和发布记录。将条件 AX 采集接入现有一次有界 focus_details，保留焦点预算提示及隐藏节点选项。
+- 发现只取截图时，应用 PID 改变后较早观察的查询别名可能残留。新增独立测试先复现失败，再清理新旧 PID 对应的全部观察别名，同时保留其他应用缓存。
+- JS 在两种观察通道同时关闭时提前拒绝，不产生 native 请求；Persistent / Worker 两种会话均测试参数、错误及旧调用兼容性。
+- 扩展 `--observation-checks`：在真实 GTK 上包装生产采集函数，确认 AX-only 没有截图、image-only 没有树或焦点读取，完整模式同时采集；检查真实 PNG、中文 / emoji 选区、名称 / PID 别名下旧索引拒绝、坐标点击及 AX 刷新后的设值。独立 GTK 状态确认结果。
+- 新增 Worker JS → native MCP → GTK smoke，验证选择通道、图片输出、旧索引异常、AX 恢复及默认完整观察。环境为现有引擎上的临时 Debian 12 ARM64 容器、私有 Xvfb / D-Bus、GTK 3 / AT-SPI 2 和 Node 24，不启动桌面 VM。
+
+验证：Python 35 项、Linux Go 30 项、Node 44 项通过；Linux ARM64 / AMD64 构建、targeted vet、shell / Python / Node 语法检查通过；按需观察真实链路、原有默认动作回读、焦点 / Unicode 选区和隐藏详情 smoke 均通过。文档与 whitespace 检查通过。未运行 Wayland 或其他 toolkit，不宣称全任务提速，无版本 bump。
+
+需求评估：#101 提供 Linux 显式通道选择，不做截图去重，也未实现其他平台的通道开关。现有 macOS / Linux JS 动作已禁用自动回读，getAXState 不输出图片，但仍可能浪费 native 采集。未变化图片省略通常仍需截图后比较，主要节省传输和模型输入；后续的跨平台支持、会话 / 应用 / 窗口隔离、首帧 / 重置 / 强制返回和精确图像比较已记录到技术债追踪，不以 AX 未变作为画面未变的证据。
+
+验证结束后已删除临时容器和独立构建制品，未影响其他容器服务。

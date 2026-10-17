@@ -235,6 +235,28 @@ func TestScreenshotOnlyInvalidatesIndexesAcrossWindowAndProcessChanges(t *testin
 	}
 }
 
+func TestScreenshotOnlyInvalidatesOlderAliasesWhenProcessChanges(t *testing.T) {
+	observationPythonResponse(t, `{"ok":true,"snapshot":{"app":{"name":"Editor","pid":43},"windowBounds":{"width":300,"height":200},"screenshotPngBase64":"cG5n"}}`)
+	s := newService()
+	older := &appSnapshot{App: appDescriptor{Name: "Editor", PID: 42}, Elements: []elementRecord{{Index: 6}}}
+	s.rememberSnapshot("older-query", older)
+	s.rememberSnapshot("Editor", &appSnapshot{App: appDescriptor{Name: "Editor", PID: 42}, Elements: []elementRecord{{Index: 7}}})
+	unrelated := &appSnapshot{App: appDescriptor{Name: "Other", PID: 99}}
+	s.rememberSnapshot("Other", unrelated)
+	result := s.callTool("get_app_state", map[string]any{"app": "Editor", "include_ax": false})
+	if result.IsError {
+		t.Fatalf("screenshot-only observation failed: %#v", result)
+	}
+	for _, alias := range []string{"older-query", "42"} {
+		if s.currentSnapshot(alias) != nil {
+			t.Fatalf("stale AX alias %q survived process replacement", alias)
+		}
+	}
+	if s.currentSnapshot("Other") != unrelated {
+		t.Fatal("unrelated app observation invalidated")
+	}
+}
+
 func TestClickMethodSchemaAndParser(t *testing.T) {
 	tool := findToolDefinition(t, "click")
 	properties := tool.InputSchema["properties"].(map[string]any)

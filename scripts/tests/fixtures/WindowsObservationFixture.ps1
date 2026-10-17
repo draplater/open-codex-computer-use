@@ -24,6 +24,7 @@ $inputBox.Size = New-Object System.Drawing.Size(400, 30)
 $inputBox.Text = "initial-value"
 $form.Controls.Add($inputBox)
 $state = @{ sequence = 0; text = ""; width = 0; height = 0; minimized = $false; cloakHResult = 0; cloaked = 0 }
+$stateEncoding = New-Object System.Text.UTF8Encoding($false)
 $commandPath = $StatePath + ".command"
 $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = 50
@@ -63,7 +64,12 @@ $timer.Add_Tick({
     $state.width = $form.Width
     $state.height = $form.Height
     $state.minimized = $form.WindowState -eq "Minimized"
-    [System.IO.File]::WriteAllText($StatePath, ($state | ConvertTo-Json -Compress), [System.Text.Encoding]::UTF8)
+    $temporary = $StatePath + ".tmp"
+    [System.IO.File]::WriteAllText($temporary, ($state | ConvertTo-Json -Compress), $stateEncoding)
+    try {
+        if (Test-Path -LiteralPath $StatePath) { [System.IO.File]::Replace($temporary, $StatePath, $null) }
+        else { [System.IO.File]::Move($temporary, $StatePath) }
+    } catch [System.IO.IOException] { }
 })
 $timer.Start()
 $form.Add_FormClosed({ $timer.Stop() })

@@ -1,7 +1,30 @@
-# Bound Linux focus lookup and reuse its result
+# Linux 焦点查找
 
-Linux snapshots currently enumerate the app/window twice and recursively locate the focused element separately for its summary and selected text. This PR resolves focus once in the window already selected for the snapshot and applies the snapshot's node/depth budgets. If traversal ends before focus is found, the returned text explicitly reports an incomplete search rather than claiming focus is absent.
+快照复用已经选定的窗口，只查找一次焦点，再从同一个元素读取焦点摘要和选中文字，省去重复的应用 / 窗口枚举与树遍历。
 
-Full AX tree/index and screenshot behavior is unchanged. The focus summary and selection come from the same element. A very deep or large focus search may now return incomplete metadata; callers can explicitly raise the existing tree budgets. This is a cooperative traversal budget, not a way to interrupt a blocking AT-SPI call.
+焦点查找单独遵守 `get_app_state` 的 `max_tree_nodes` / `max_tree_depth` 上限，默认 1200 个节点、64 层。到达深度上限后不再读取下一层子节点。预算不足且未找到焦点时，返回：
 
-Validation: Python bridge tests (14 passed), including shared focus lookup, node/depth bounds, complete absence and explicit truncation reporting. No live desktop benchmark is claimed.
+```text
+[Focus search incomplete: node/depth budget reached.]
+```
+
+这表示查找未完成。需要时可以提高预算后重试。完整 AX tree、索引和截图仍走原来的路径；遍历预算也无法中断某一次阻塞的 AT-SPI 调用，外层 bridge 仍有超时保护。
+
+选区使用标准 AT-SPI `get_n_selections` / `get_selection` / `get_text` 接口，按字符偏移读取，支持中文和 emoji，并遵守 `text_limit`。没有选区或选区读取失败时仍可返回焦点摘要。
+
+## 测试
+
+回归测试：
+
+```sh
+python3 apps/OpenComputerUseLinux/runtime_test.py
+```
+
+在 Linux 上构建后，可复用 [GTK smoke 环境](linux-action-read-back.md) 验证真实焦点和选区：
+
+```sh
+(cd apps/OpenComputerUseLinux && go build -o /tmp/ocu-focus-test .)
+bash scripts/run-linux-read-back-smoke.sh /tmp/ocu-focus-test --focus-checks
+```
+
+脚本在私有 D-Bus / Xvfb 中创建自己的窗口，验证节点 / 深度预算提示、提高预算后的选区、中文 / emoji、文本截断，以及清除选区后的焦点摘要。覆盖 X11 / GTK / AT-SPI，不代表 Wayland 或其他应用的性能测试。

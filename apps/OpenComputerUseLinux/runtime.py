@@ -400,7 +400,13 @@ def focus_details(window, text_limit=DEFAULT_TEXT_LIMIT, max_nodes=MAX_ELEMENTS,
             return None
         if state_contains(node, Atspi.StateType.FOCUSED):
             return node
-        for index in range(child_count(node)):
+        children = child_count(node)
+        if depth >= max_depth:
+            # Do not fetch children that cannot be visited. Otherwise a wide
+            # node at the depth boundary can bypass the node budget entirely.
+            truncated = truncated or children > 0
+            return None
+        for index in range(children):
             if visited >= max_nodes:
                 truncated = True
                 break
@@ -416,9 +422,9 @@ def focus_details(window, text_limit=DEFAULT_TEXT_LIMIT, max_nodes=MAX_ELEMENTS,
     selection = None
     if supports_interface(focused, "Text"):
         text_iface = safe(focused.get_text_iface)
-        selections = safe(lambda: Atspi.Text.get_text_selections(text_iface), [])
-        if selections:
-            selected = selections[0]
+        count = safe(lambda: Atspi.Text.get_n_selections(text_iface), 0)
+        selected = safe(lambda: Atspi.Text.get_selection(text_iface, 0)) if count > 0 else None
+        if selected is not None:
             end = selected.end_offset
             if text_limit is not None:
                 end = min(end, selected.start_offset + text_limit + 1)

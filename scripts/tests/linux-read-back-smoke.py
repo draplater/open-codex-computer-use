@@ -13,7 +13,7 @@ import tempfile
 import time
 
 
-def fixture(name, state_file):
+def fixture(name, state_file, focus_checks=False):
     import gi
 
     gi.require_version("Gtk", "3.0")
@@ -37,6 +37,8 @@ def fixture(name, state_file):
     def publish(*_args):
         state["text"] = entry.get_text()
         state["focused"] = entry.has_focus()
+        bounds = entry.get_selection_bounds()
+        state["selected"] = entry.get_text()[bounds[0]:bounds[1]] if bounds else ""
         temporary = state_file.with_suffix(".tmp")
         temporary.write_text(json.dumps(state))
         temporary.replace(state_file)
@@ -55,10 +57,24 @@ def fixture(name, state_file):
     button.connect("clicked", increment)
     entry.connect("changed", publish)
     entry.connect("activate", activate)
+    entry.connect("notify::selection-bound", publish)
+    entry.connect("notify::cursor-position", publish)
+    entry.connect("notify::has-focus", publish)
     window.connect("destroy", Gtk.main_quit)
     window.show_all()
     entry.grab_focus()
     window.get_window().focus(Gdk.CURRENT_TIME)
+    if focus_checks:
+        def initialize_selection():
+            entry.grab_focus()
+            window.get_window().focus(Gdk.CURRENT_TIME)
+            if not entry.has_focus():
+                return True
+            entry.set_text("prefix-中文🙂-suffix")
+            entry.select_region(7, 10)
+            publish()
+            return False
+        GLib.timeout_add(20, initialize_selection)
     publish()
     Gtk.main()
 
@@ -138,14 +154,45 @@ def element_index(result, name):
     return matches[0]
 
 
-def smoke(native):
+def check_focus(client, name, state_file):
+    wait_for(lambda: json.loads(state_file.read_text())["focused"] and
+             json.loads(state_file.read_text())["selected"] == "中文🙂", "fixture focus and selection")
+    marker = "[Focus search incomplete: node/depth budget reached.]"
+    for limits in ({"max_tree_depth": 1}, {"max_tree_nodes": 2}):
+        result = client.call("get_app_state", name, **limits)
+        assert not result.get("isError"), result
+        assert marker in text(result), text(result)
+        assert "Selected text:" not in text(result), text(result)
+        assert "The focused UI element" not in text(result), text(result)
+    observed = client.call("get_app_state", name, max_tree_depth=10)
+    expect_snapshot(observed)
+    actual = json.loads(state_file.read_text())
+    assert actual["focused"] and actual["selected"] == "中文🙂", actual
+    assert "Selected text: [中文🙂]" in text(observed), text(observed)
+    assert marker not in text(observed), text(observed)
+    limited = client.call("get_app_state", name, text_limit=2)
+    assert not limited.get("isError"), limited
+    assert "Selected text: [中文...]" in text(limited), text(limited)
+    result = client.call("press_key", name, key="Right")
+    assert not result.get("isError"), result
+    wait_for(lambda: json.loads(state_file.read_text())["selected"] == "", "selection cleared by real key")
+    observed = client.call("get_app_state", name)
+    expect_snapshot(observed)
+    assert "Selected text:" not in text(observed), text(observed)
+    assert "The focused UI element is text Read-back input." in text(observed), text(observed)
+    print("Focus smoke: node/depth limits, Unicode selection, text limit and focus summary passed.")
+
+
+def smoke(native, focus_checks=False):
     with tempfile.TemporaryDirectory(prefix="ocu-read-back-smoke-") as directory:
         directory = Path(directory)
         state_file = directory / "state.json"
         name = "OCUReadBackFixture" + str(os.getpid())
         with (directory / "stderr.log").open("w+") as stderr:
-            process = subprocess.Popen([sys.executable, __file__, "--fixture", name,
-                                        "--state-file", str(state_file)], stderr=stderr)
+            arguments = [sys.executable, __file__, "--fixture", name, "--state-file", str(state_file)]
+            if focus_checks:
+                arguments.append("--focus-checks")
+            process = subprocess.Popen(arguments, stderr=stderr)
             clients = []
             try:
                 wait_for(state_file.exists, "GTK fixture startup")
@@ -153,6 +200,9 @@ def smoke(native):
                 clients.append(client)
                 # AT-SPI registration follows GTK startup asynchronously.
                 wait_for(lambda: not client.call("get_app_state", name).get("isError"), "AT-SPI registration")
+                if focus_checks:
+                    check_focus(client, name, state_file)
+                    return
                 observed = client.call("get_app_state", name)
                 expect_snapshot(observed)
                 input_index = element_index(observed, "Read-back input")
@@ -221,11 +271,12 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--native")
     parser.add_argument("--fixture")
+    parser.add_argument("--focus-checks", action="store_true")
     parser.add_argument("--state-file", type=Path)
     args = parser.parse_args()
     if args.fixture:
-        fixture(args.fixture, args.state_file)
+        fixture(args.fixture, args.state_file, args.focus_checks)
     else:
         if not args.native:
             parser.error("--native is required")
-        smoke(str(Path(args.native).resolve()))
+        smoke(str(Path(args.native).resolve()), args.focus_checks)

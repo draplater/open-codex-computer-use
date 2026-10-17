@@ -70,4 +70,13 @@ Windows 的 PowerShell 采集分支可用以下命令单独验证：
 pwsh -NoProfile -File scripts/tests/windows-observation.test.ps1 -RuntimePath apps/OpenComputerUseWindows/runtime.ps1
 ```
 
-这个测试解析生产脚本并执行其中的观察函数，使用带计数的 UIA / 截图依赖验证分支。它不等于 Windows 桌面实测；本轮 Windows Go 测试、PowerShell 函数测试及 ARM64 / AMD64 交叉构建通过，尚未在真实 Windows 桌面验证 UIA。
+这个测试解析生产脚本并执行其中的观察函数，使用带计数的 UIA / 截图依赖验证分支。它不等于 Windows 桌面实测。
+
+Windows 桌面测试需要已登录的交互会话、Windows PowerShell 和 Node.js：
+
+```powershell
+go -C apps/OpenComputerUseWindows build -o "$env:TEMP/ocu-observation.exe" .
+pwsh -File scripts/tests/windows-observation-smoke.ps1 -NativePath "$env:TEMP/ocu-observation.exe"
+```
+
+脚本创建自己的 WPF 窗口，通过真实 UIA / native MCP / CLI / Worker JS 检查通道选择、旧索引拒绝、AX 恢复、Unicode 设值和截图坐标拒绝；再用同进程的 Win32 小窗口验证物理 1×1 边界，并检查 WPF 最小化、cloaked 时不返回图片，恢复后重新返回 PNG。`.github/workflows/windows-observation.yml` 在 Windows runner 执行这组检查。WPF 的通过结果不代表所有 WinForms / WinUI / Electron 控件都支持相同 UIA pattern。

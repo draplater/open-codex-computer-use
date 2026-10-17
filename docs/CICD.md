@@ -21,7 +21,7 @@
 
 ## Windows 观察回归
 
-`.github/workflows/windows-observation.yml` 在相关 PR 上运行 Windows Go 测试、PowerShell 生产采集函数测试，以及独立 WinForms / native MCP smoke，也支持手动触发。工作流仅需 `contents: read`，沿用固定 SHA 的 checkout / setup-go，不发布制品。桌面 smoke 使用自己的窗口，验证采集开关、索引与 UIA 设值，以及正常 / 1x1 / 最小化 / cloaked 窗口的截图边界。复现命令见 [按需观察](selective-observation.md)。
+`.github/workflows/windows-observation.yml` 在相关 PR 上运行 Windows Go 测试、PowerShell 生产采集函数测试，以及独立 WPF / native MCP smoke，也支持手动触发。工作流仅需 `contents: read`，沿用固定 SHA 的 checkout / setup-node / setup-go，不发布制品。桌面 smoke 使用自己的窗口，验证采集开关、索引与 UIA 设值，以及正常 / 1x1 / 最小化 / cloaked 窗口的截图边界。复现命令见 [按需观察](selective-observation.md)。
 
 ## 推荐接入顺序
 

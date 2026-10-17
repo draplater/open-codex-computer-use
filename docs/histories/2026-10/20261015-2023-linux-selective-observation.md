@@ -60,4 +60,7 @@ Changing `getScreenshot()` defaults would also change its implicit index refresh
 - 三个平台的 snapshot CLI 新增 --include-ax / --include-screenshot true|false。只取 AX 后拒绝截图坐标输入，保留元素操作。macOS CLI 改为打印所有文本说明但不输出图片字节，修复实测发现的省略原因丢失。
 - macOS 正常签名 release + 自有 AppKit 窗口实测通过：CLI / MCP / Worker JS、PNG、timing 分支证据、普通 / query 索引失效、坐标拒绝与 AX 恢复；窗口不能成为 key/main，未修改系统准入或权限。
 - 本地检查：Swift 382 项（8 跳过、0 失败），观察专项 8 项；Linux Go 31 项、Python 35 项、Node 44 项；Windows Go 29 项与生产 PowerShell 函数分支测试通过；Linux / Windows 双架构构建及 targeted vet 通过。真实 GTK 观察、焦点、隐藏详情及 macOS 原生工具 / cursor smoke 通过。
-- 增加专门的 Windows Actions 检查与临时 WinForms 夹具，尝试补齐 RELIABILITY 要求的真实 UIA / 截图验证。该 hosted 检查结果仍待记录，不把 PowerShell 依赖替身测试冒充桌面通过。工作流使用仓库既有固定 SHA actions 和 contents:read，无发布步骤。
+- 增加专门的 Windows Actions 检查与临时 WPF 夹具，真实 Windows 2025 桌面上的 Go / Windows PowerShell 5.1 / native MCP / CLI / Worker JS 全部通过。覆盖三个通道模式、旧索引拒绝、AX 恢复、真实 Unicode 设值和坐标拒绝；正常窗口返回 PNG，物理 1×1 Win32 小窗口、最小化及 DWM-cloaked 窗口不返回图片，恢复后重新返回 PNG。工作流使用仓库既有固定 SHA actions 和 contents:read，无发布步骤。
+- 初版 WinForms 控件不提供可写 ValuePattern，正向设值测试改用标准 WPF TextBox，没有扩大生产输入 fallback。夹具状态文件用无 BOM UTF-8 原子写入，避免 Windows PowerShell 空字符串与 null 的文件替换差异。精确 1×1 用同进程 Win32 窗口，避开 WPF 高 DPI 最小尺寸取整。
+- Windows [完整实测记录](https://github.com/iFurySt/open-computer-use/actions/runs/39018965035) 通过于 `ae8ec2f`。覆盖 AppKit / GTK / WPF，不宣称所有 toolkit、Wayland 或完整任务性能均已验证。
+- 文档同步为三平台使用方式、可复现测试命令、Windows CI 和当前覆盖范围；原 execution plan 完成归档，PR 保持开放，未执行合并。

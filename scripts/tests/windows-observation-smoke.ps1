@@ -57,6 +57,11 @@ try {
     $fixture = Start-Process powershell.exe -ArgumentList @("-NoProfile", "-STA", "-File", "`"$fixtureSource`"", "-StatePath", "`"$stateFile`"") -PassThru
     Wait-For { Test-Path -LiteralPath $stateFile } "WPF startup"
     Wait-For { (Get-Process -Id $fixture.Id).MainWindowHandle -ne [IntPtr]::Zero } "visible WPF main window"
+    # The bridge uses Windows PowerShell/.NET Framework, while the controller
+    # may use pwsh/.NET. Diagnose only our disposable process on both hosts.
+    $probe = '$p = Get-Process -Id ' + $fixture.Id + '; $p | Select-Object Id, MainWindowHandle, MainWindowTitle | ConvertTo-Json -Compress; Get-Process | Where-Object Id -eq ' + $fixture.Id + ' | Select-Object Id, MainWindowHandle, MainWindowTitle | ConvertTo-Json -Compress'
+    & powershell.exe -NoProfile -NonInteractive -Command $probe
+    Write-Output ((Get-Process -Id $fixture.Id | Select-Object Id, MainWindowHandle, MainWindowTitle) | ConvertTo-Json -Compress)
     $start = New-Object System.Diagnostics.ProcessStartInfo
     $start.FileName = $NativePath
     $start.Arguments = "mcp"

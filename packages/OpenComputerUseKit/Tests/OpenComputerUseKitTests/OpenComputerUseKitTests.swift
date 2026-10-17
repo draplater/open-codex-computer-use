@@ -630,7 +630,7 @@ final class OpenComputerUseKitTests: XCTestCase {
 
     func testInitializeResponseContainsToolsCapability() throws {
         let server = StdioMCPServer(service: ComputerUseService())
-        let response = server.handle(line: #"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","clientInfo":{"name":"test","version":"1.1.0"},"capabilities":{}}}"#)
+        let response = server.handle(line: #"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","clientInfo":{"name":"test","version":"1.1.1"},"capabilities":{}}}"#)
         XCTAssertNotNil(response)
         XCTAssertTrue(response!.contains(#""name":"open-computer-use""#))
         XCTAssertTrue(response!.contains(#""tools":{"listChanged":false}"#))
@@ -639,7 +639,7 @@ final class OpenComputerUseKitTests: XCTestCase {
     func testInitializeResponseContainsComputerUseInstructions() throws {
         let server = StdioMCPServer(service: ComputerUseService())
         let response = try XCTUnwrap(
-            server.handle(line: #"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","clientInfo":{"name":"test","version":"1.1.0"},"capabilities":{}}}"#)
+            server.handle(line: #"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","clientInfo":{"name":"test","version":"1.1.1"},"capabilities":{}}}"#)
         )
         let data = try XCTUnwrap(response.data(using: .utf8))
         let json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
@@ -2006,11 +2006,20 @@ final class OpenComputerUseKitTests: XCTestCase {
             screenMappings: screenMappings
         )
 
+        // The target also carries the anchor: the element centre relative to
+        // the window frame it was derived from, which is what lets the overlay
+        // follow the window if it moves before the action lands.
         XCTAssertEqual(
             target,
             VisualCursorTarget(
                 point: CGPoint(x: 484, y: 724),
-                window: CursorTargetWindow(windowID: 321, layer: 8)
+                window: CursorTargetWindow(windowID: 321, layer: 8),
+                anchor: CursorRestingAnchor(
+                    windowID: 321,
+                    layer: 8,
+                    windowLocalPoint: CGPoint(x: 84, y: 56),
+                    windowBounds: CGRect(x: 400, y: 220, width: 900, height: 640)
+                )
             )
         )
     }

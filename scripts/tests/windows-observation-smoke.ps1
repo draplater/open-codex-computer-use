@@ -100,6 +100,8 @@ try {
     }
     $cli = & $NativePath snapshot --include-screenshot false ([string]$fixture.Id)
     Assert ($LASTEXITCODE -eq 0 -and ($cli -join "`n") -match "include_screenshot=false") "CLI flag not forwarded"
+    & node (Join-Path $PSScriptRoot "windows-observation-js-smoke.mjs") $NativePath ([string]$fixture.Id) $stateFile
+    Assert ($LASTEXITCODE -eq 0) "Worker JS desktop smoke failed"
     Write-Output "Windows real WinForms/native MCP/CLI: channels, stale indexes, AX recovery, coordinate refusal, Unicode text update, 1x1/minimized/cloaked screenshot filtering passed."
 } finally {
     if ($null -ne $native -and -not $native.HasExited) {
